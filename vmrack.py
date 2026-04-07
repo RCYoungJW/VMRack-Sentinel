@@ -200,7 +200,7 @@ class VMRackSentinelApp:
                 page = browser.new_context(no_viewport=True, **ctx_kwargs).new_page()
                 page.goto(ACTIVITY_URL, timeout=50000, wait_until="domcontentloaded")
                 
-                if not is_monitoring: self.log("📡 深度探测中，消除网页隐藏代码...", "info")
+                if not is_monitoring: self.log("📡 深度探测中，查询所有套餐...", "info")
                 
                 results = page.evaluate("""async () => {
                     document.querySelectorAll('script, style, noscript, svg, template').forEach(el => el.remove());
