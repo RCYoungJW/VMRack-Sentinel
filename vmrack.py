@@ -352,24 +352,23 @@ class VMRackSentinelApp:
                                     if (el && el.children.length === 0 && (el.innerText || '').includes(tName)) {{
                                         let card = el.parentElement;
                                         for (let i = 0; i < 8; i++) {{
-                                            if (card) {{
+                                            if (card) {
                                                 const btns = Array.from(card.querySelectorAll('a, button, div')).filter(b => 
                                                     /立即|使用|购买|抢购|下单/.test(((b.innerText || '').replace(/\\s+/g, '')))
                                                 );
                                                 if (btns.length > 0) {{ btns[btns.length - 1].click(); return; }}
                                                 card = card.parentElement;
-                                            }}
-                                        }}
-                                    }}
-                                }}
+                                            }
+                                        }
+                                    }
+                                }
                             }}""", target_name)
                         except: pass
                     try: 
                         page.wait_for_event("close", timeout=0)
-                        # 🌟 修复关键点：当浏览器关闭时，自动保存最新的登录状态到 json
+                        # 🌟 核心改进点：当下单浏览器关闭时，也保存一次最新的登录状态
                         context.storage_state(path=SESSION_FILE)
                         self.root.after(0, lambda: self._update_login_btn(True))
-                        self.log("✅ 已自动同步最新的登录状态。", "success")
                     except: pass
                     finally:
                         try: context.close()
@@ -412,7 +411,7 @@ class VMRackSentinelApp:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    # 🌟 图标逻辑：如果是打包环境，释放内置图标
+    # 🌟 唯一图标读取逻辑
     if hasattr(sys, '_MEIPASS'):
         try:
             _img_path = os.path.join(sys._MEIPASS, "icon.png")
