@@ -4,14 +4,14 @@ on:
   push:
     branches: [ main ]
     tags:
-      - 'v*'  # 当您推送以 v 开头的标签（如 v1.1）时触发自动发布 Release
-  workflow_dispatch:      # 支持手动点击运行任务
+      - 'v*'  # 只要您推送 v 开头的标签（如 v1.1），就会触发自动发布
+  workflow_dispatch:      # 支持在 Actions 页面手动点击运行
 
 jobs:
   build:
     runs-on: windows-latest
     permissions:
-      contents: write     # 必须开启写入权限，否则无法自动创建 Release
+      contents: write     # 开启写入权限，用于自动创建 Release 并上传文件
 
     steps:
     - name: Checkout Code
@@ -27,21 +27,23 @@ jobs:
         python -m pip install --upgrade pip
         pip install playwright pyinstaller
 
-    - name: Build EXE with PyInstaller
+    - name: Build EXE with Dynamic Version
+      # 使用 github.ref_name 获取当前的标签名（如 v1.0）或分支名（如 main）
       run: |
-        # 严格执行您的打包参数：单文件、无控制台窗口
-        pyinstaller --noconfirm --onefile --windowed --name "VMRack_Sentinel" vmrack.py
+        pyinstaller --noconfirm --onefile --windowed --name "VMRack_Sentinel_${{ github.ref_name }}" vmrack.py
 
     - name: Upload Artifact (Actions Tab)
+      # 这里决定了 Actions 页面生成的下载包（ZIP）的名称
       uses: actions/upload-artifact@v4
       with:
-        name: VMRack_Sentinel_EXE
-        path: dist/VMRack_Sentinel.exe
+        name: VMRack_Sentinel_${{ github.ref_name }}
+        path: dist/VMRack_Sentinel_${{ github.ref_name }}.exe
 
-    - name: Auto Release EXE
+    - name: Auto Release EXE to Release Page
+      # 仅当您推送的是标签（Tag）时，才执行此步骤
       if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v2
       with:
-        files: dist/VMRack_Sentinel.exe
+        files: dist/VMRack_Sentinel_${{ github.ref_name }}.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
