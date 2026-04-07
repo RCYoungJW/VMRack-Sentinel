@@ -29,8 +29,10 @@ jobs:
     - name: Build EXE with Dynamic Version
       # 此时 github.ref_name 必定是你的标签号（如 v1.0）
       run: |
-        # 🚀 在这里加入了 --icon=icon.ico 参数
-        pyinstaller --noconfirm --onefile --windowed --icon=icon.ico --name "VMRack_Sentinel_${{ github.ref_name }}" vmrack.py
+        # 🚀 仅在这里修改了打包参数：
+        # 1. --icon=icon.ico 负责 EXE 文件在文件夹里的外观
+        # 2. --add-data "icon.png;." 负责将图片缝进 EXE 内部，解决任务栏羽毛问题
+        pyinstaller --noconfirm --onefile --windowed --icon=icon.ico --add-data "icon.png;." --name "VMRack_Sentinel_${{ github.ref_name }}" vmrack.py
 
     - name: Upload Artifact (Actions Tab)
       uses: actions/upload-artifact@v4
