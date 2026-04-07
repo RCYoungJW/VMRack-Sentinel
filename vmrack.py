@@ -22,14 +22,14 @@ try:
 except ImportError:
     PLAYWRIGHT_OK = False
 
-# ── 路径与目录锁定逻辑 (确保安装在当前文件夹) ──────────────────────────────────────────
-# 1. 确定程序运行的根目录
+# ── 路径与目录严格锁定 ────────────────────────────────────────────────────────
+# 获取当前 EXE 所在的确切位置
 if getattr(sys, 'frozen', False):
     _RUN_DIR = os.path.dirname(sys.executable)
 else:
     _RUN_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 2. 强制锁定浏览器安装在当前目录下的 playwright_browsers 文件夹
+# 全局环境变量锁死：强制安装到当前目录的 playwright_browsers 文件夹
 BROWSER_INSTALL_DIR = os.path.join(_RUN_DIR, "playwright_browsers")
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_INSTALL_DIR
 
@@ -40,7 +40,10 @@ def _beep():
     try:
         import winsound
         winsound.Beep(1800, 600)
-    except Exception: pass
+    except Exception:
+        try:
+            sys.stdout.write("\a"); sys.stdout.flush()
+        except Exception: pass
 
 def _sf(size, weight="normal"):
     families = ["SF Pro Text", "SF Pro Display", ".AppleSystemUIFont", "Segoe UI", "Arial"]
@@ -93,7 +96,6 @@ class VMRackSentinelApp:
         root.rowconfigure(1, weight=8, minsize=520)  
         root.rowconfigure(3, weight=2, minsize=220)  
 
-        # ── 顶部栏 ──
         top = tk.Frame(root, bg=PAL["card"], highlightthickness=1, highlightbackground=PAL["border"])
         top.grid(row=0, column=0, sticky="ew")
         top.columnconfigure(1, weight=1)
@@ -117,12 +119,13 @@ class VMRackSentinelApp:
         self.btn_scan.config(state="disabled")
         self.btn_monitor.config(state="disabled", bg="#D1D1D6", fg="white", disabledforeground="white")
 
-        # ── 列表区 ──
         list_wrap = tk.Frame(root, bg=PAL["card"], highlightthickness=1, highlightbackground=PAL["border"])
         list_wrap.grid(row=1, column=0, sticky="nsew", padx=20, pady=(12, 0))
         list_wrap.columnconfigure(0, weight=1); list_wrap.rowconfigure(1, weight=1)
-        tk.Label(list_wrap, text="套餐列表", bg=PAL["card"], fg=PAL["text"], font=_sf(13, "bold")).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 4))
-        
+        list_hdr = tk.Frame(list_wrap, bg=PAL["card"]); list_hdr.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 4))
+        tk.Label(list_hdr, text="套餐列表", bg=PAL["card"], fg=PAL["text"], font=_sf(13, "bold")).pack(side="left")
+        self._count_lbl = tk.Label(list_hdr, text="", bg=PAL["card"], fg=PAL["subtext"], font=_sf(11)); self._count_lbl.pack(side="left", padx=8)
+
         tv_frame = tk.Frame(list_wrap, bg=PAL["card"]); tv_frame.grid(row=1, column=0, sticky="nsew")
         tv_frame.columnconfigure(0, weight=1); tv_frame.rowconfigure(0, weight=1)
         self.tree = ttk.Treeview(tv_frame, columns=("name", "status"), show="headings", style="Mac.Treeview", selectmode="browse")
@@ -133,7 +136,6 @@ class VMRackSentinelApp:
         vsb.grid(row=0, column=1, sticky="ns"); self.tree.configure(yscrollcommand=vsb.set)
         self.tree.tag_configure("stock", foreground=PAL["success"]); self.tree.tag_configure("sold", foreground=PAL["danger"]); self.tree.tag_configure("alt", background=PAL["row_alt"])
 
-        # ── 日志区 ──
         sep_frame = tk.Frame(root, bg=PAL["card"]); sep_frame.grid(row=2, column=0, sticky="ew", padx=20, pady=(8, 0))
         tk.Frame(sep_frame, bg=PAL["border"], height=1).pack(fill="x")
         tk.Label(sep_frame, text="系统日志", bg=PAL["card"], fg=PAL["text"], font=_sf(13, "bold")).pack(side="left", padx=16, pady=(8, 4))
@@ -163,12 +165,8 @@ class VMRackSentinelApp:
         self.root.after(0, lambda: (self._status_dot.config(fg=color), self._status_lbl.config(text=text, fg=color)))
 
     def _auto_setup(self):
-        """核心修复：确保安装和读取路径严格锁定在当前所在文件夹"""
+        """完全避开 sys.executable，使用内部 Driver，根除死循环并锁定文件夹"""
         if not PLAYWRIGHT_OK: return
-        
-        # 再次确保环境变量在线程内也生效
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_INSTALL_DIR
-        
         try:
             with sync_playwright() as p:
                 try:
@@ -179,16 +177,19 @@ class VMRackSentinelApp:
                     self.log("⚠ 未检测到浏览器内核，正在后台配置到当前文件夹...", "warn")
                     self._set_status("环境配置中...", PAL["warn"])
                     
-                    # 设定静默安装参数
+                    # 🚀 核心修复：直接导入 Playwright 底层驱动可执行文件，不再使用 sys.executable
+                    from playwright._impl._driver import compute_driver_executable
+                    driver_executable = compute_driver_executable()
+                    
                     si = subprocess.STARTUPINFO()
                     si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                     
-                    # 关键：显式设置执行环境中的路径变量
                     env = os.environ.copy()
                     env["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_INSTALL_DIR
                     
+                    # 调用底层 Node 驱动直接拉取浏览器，彻底切断 EXE 死循环的根源
                     ret = subprocess.run(
-                        [sys.executable, "-m", "playwright", "install", "chromium"],
+                        [driver_executable, "install", "chromium"],
                         capture_output=True,
                         env=env,
                         startupinfo=si,
@@ -199,7 +200,7 @@ class VMRackSentinelApp:
                         self._env_ready = True
                         self.log("✅ 环境配置完成。", "success"); self._set_status("就绪", PAL["success"])
                     else:
-                        self.log("❌ 环境配置失败，请检查文件夹写入权限。", "error")
+                        self.log("❌ 环境配置失败，请检查网络或权限。", "error")
                         self._set_status("配置失败", PAL["danger"])
         except Exception as e:
             self.log(f"❌ 系统异常: {e}", "error")
@@ -232,7 +233,7 @@ class VMRackSentinelApp:
                     return data;
                 }""")
                 browser.close(); return results
-        except Exception as e: self.log(f"⚠ 扫描异常: {e}", "warn"); return []
+        except Exception as e: self.log(f"⚠ 扫描引擎异常: {e}", "warn"); return []
 
     def _scan_async(self):
         if not self._scan_lock.acquire(blocking=False): return
