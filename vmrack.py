@@ -70,6 +70,7 @@ class VMRackSentinelApp:
         self._scan_lock         = threading.Lock()
         self._monitor_thread_active = False 
         self._env_ready         = False 
+        self._browser_open      = False # 新增：浏览器占用锁，防止死锁报错
 
         self._setup_styles()
         self._build_ui()
@@ -110,8 +111,8 @@ class VMRackSentinelApp:
         self.btn_monitor = self._pill_btn(btns, "开始监测",   self._toggle,     ghost=False)
         self.btn_login.pack(side="left", padx=(0, 12)); self.btn_scan.pack(side="left", padx=(0, 12)); self.btn_monitor.pack(side="left")
         
-        # 初始化登录按钮状态
-        if os.path.exists(SESSION_FILE) or os.path.exists(PROFILE_DIR):
+        # 修复1：只认 Session 文件，不认文件夹，防止假登录判定
+        if os.path.exists(SESSION_FILE):
             self._update_login_btn(is_logged_in=True)
 
         self.btn_scan.config(state="disabled")
@@ -200,7 +201,6 @@ class VMRackSentinelApp:
                     for (let i = 0; i < 20; i++) { window.scrollTo(0, i * 600); await new Promise(r => setTimeout(r, 120)); }
                     await new Promise(r => setTimeout(r, 1800));
                     
-                    // 核心校验：检测网页内是否存在登录链接，以此判断是否掉线失效
                     const isLoggedOut = !!document.querySelector('a[href*="/login"], a[href*="sign-in"]');
                     
                     const data = []; const seen = new Set();
@@ -246,7 +246,6 @@ class VMRackSentinelApp:
 
     def _handle_scan_result(self, expired, items):
         """统一处理扫描结果并同步UI状态"""
-        # 实时同步按钮状态
         self._update_login_btn(not expired)
         if expired and self.btn_login.cget("text") != "登录账号":
             self.log("⚠ 发现登录状态已失效，部分抢购可能受限，请重新登录！", "warn")
@@ -289,7 +288,6 @@ class VMRackSentinelApp:
             expired = results.get("expired", False)
             items = results.get("items", [])
             
-            # 监控中如果发现登录失效，立刻切换按钮状态并警告
             self.root.after(0, lambda e=expired: self._update_login_btn(not e))
             if expired:
                 self.log("⚠ 警告：监测到登录已掉线失效，请尽快重新登录！", "warn")
@@ -327,7 +325,13 @@ class VMRackSentinelApp:
         while not self._alarm_stop.is_set(): _beep(); time.sleep(0.35)
 
     def _open_browser_to_buy(self, url):
+        # 修复2：增加占用锁检查，防止双开报错死锁
+        if self._browser_open:
+            self.log("⚠ 浏览器已经被占用，请先关闭其他弹出的浏览器窗口。", "warn")
+            return
+            
         def _task():
+            self._browser_open = True
             try:
                 with sync_playwright() as p:
                     context = p.chromium.launch_persistent_context(
@@ -338,15 +342,27 @@ class VMRackSentinelApp:
                     )
                     page = context.pages[0] if context.pages else context.new_page()
                     page.goto(url)
-                    page.wait_for_event("close", timeout=0)
-                    context.close()
+                    
+                    try: page.wait_for_event("close", timeout=0)
+                    except: pass
+                    finally:
+                        try: context.close()
+                        except: pass
             except Exception as e:
                 self.log(f"❌ 唤起购买页面失败: {e}", "error")
+            finally:
+                self._browser_open = False
         threading.Thread(target=_task, daemon=True).start()
 
     def _do_login(self):
+        # 修复3：增加占用锁，彻底避免点两次带来的崩溃死锁
+        if getattr(self, '_browser_open', False):
+            self.log("⚠ 浏览器已经被占用，请先关闭当前浏览器窗口。", "warn")
+            return
+            
         self.log("🚀 打开专属原生浏览器，请完成登录。成功后网页会自动关闭...", "info")
         def _task():
+            self._browser_open = True
             try:
                 with sync_playwright() as p:
                     context = p.chromium.launch_persistent_context(
@@ -355,25 +371,32 @@ class VMRackSentinelApp:
                         headless=False,
                         no_viewport=True
                     )
-                    
                     page = context.pages[0] if context.pages else context.new_page()
                     login_url = "https://sso.vmrack.net/sign-in?redirect=https%253A%252F%252Fwww.vmrack.net"
                     page.goto(login_url)
                     
                     try:
+                        # 只有真正等到了跳转网址，才认为是真登录
                         page.wait_for_url("https://www.vmrack.net/**", timeout=0)
+                        
+                        # 成功跳转后，提取Cookie保存
+                        context.storage_state(path=SESSION_FILE)
+                        self.log("✅ 登录状态已成功保存至本地档案！", "success")
+                        self.root.after(0, lambda: self._update_login_btn(True))
+                        
                     except Exception:
-                        pass
-                    
-                    context.storage_state(path=SESSION_FILE)
-                    self.log("✅ 登录状态已成功保存至本地档案！", "success")
-                    
-                    # 登录成功后，主动将UI按钮切回已登录状态
-                    self.root.after(0, lambda: self._update_login_btn(True))
-                    context.close()
+                        # 如果是用户手动关闭了窗口，会抛出异常跳到这里，不修改任何登录状态
+                        self.log("ℹ️ 浏览器窗口已关闭（未检测到完成登录）。", "info")
+                    finally:
+                        # 修复4：无论发不发生异常，确保底层浏览器进程被严格杀死
+                        try: context.close()
+                        except: pass
+                        
             except Exception as e:
                 if "Target closed" not in str(e) and "has been closed" not in str(e):
                     self.log(f"❌ 登录异常: {e}", "error")
+            finally:
+                self._browser_open = False
         threading.Thread(target=_task, daemon=True).start()
 
 if __name__ == "__main__":
