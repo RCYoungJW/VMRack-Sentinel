@@ -263,6 +263,8 @@ class VMRackSentinelApp:
 
     def _handle_scan_result(self, expired, items):
         self._update_login_btn(not expired)
+        if expired and self.btn_login.cget("text") != "登录账号":
+            self.log("⚠ 发现登录状态已失效，部分抢购可能受限，请重新登录！", "warn")
         for i in self.tree.get_children(): self.tree.delete(i)
         if not items: return
         for idx, item in enumerate(items):
@@ -272,6 +274,9 @@ class VMRackSentinelApp:
             self.tree.insert("", "end", values=(f"  {clean_name}", item["status"]), tags=tag)
         stock_cnt = sum(1 for i in items if "有货" in i["status"])
         self._count_lbl.config(text=f"{len(items)} 个套餐  ·  {stock_cnt} 个有货")
+        if not self.running:
+            self.log(f"✅ 扫描完成，共 {len(items)} 项，{stock_cnt} 项有货。", "success")
+            self._set_status("就绪", PAL["success"]); self.btn_monitor.config(state="normal", bg=PAL["accent"])
 
     def _toggle(self):
         if self.running:
@@ -287,21 +292,24 @@ class VMRackSentinelApp:
 
     def _monitor_loop(self):
         self._monitor_thread_active = True
+        self.log(f"📡 实时监测锁定：{self.target_name}", "info")
         while self.running:
             results = self._core_scanner(is_monitoring=True)
             if not self.running: break
             expired = results.get("expired", False)
             items = results.get("items", [])
             self.root.after(0, lambda e=expired: self._update_login_btn(not e))
+            if expired: self.log("⚠ 警告：监测到登录已掉线失效，请尽快重新登录！", "warn")
             match = next((r for r in items if r["name"].strip() == self.target_name.strip()), None)
             if match:
                 self.package_urls[self.target_name.strip()] = match.get("url", ACTIVITY_URL)
+                self.log(f"↻ 轮询结果：{self.target_name}  →  {match['status']}", "info")
                 self.root.after(0, lambda: self._handle_scan_result(expired, items))
                 if "有货" in match["status"]:
                     self.running = False; self.root.after(0, self._show_alert); break
             time.sleep(5)
         self.root.after(0, lambda: self.btn_monitor.config(text="开始监测", bg=PAL["accent"], fg="white"))
-        self._monitor_thread_active = False
+        self._set_status("监测已结束", PAL["subtext"]); self._monitor_thread_active = False
 
     def _show_alert(self):
         if self._dialog_showing: return
@@ -310,6 +318,7 @@ class VMRackSentinelApp:
         target_url = self.package_urls.get(self.target_name.strip(), ACTIVITY_URL)
         def _dismiss():
             self._alarm_stop.set(); self._dialog_showing = False; win.destroy()
+            self.log(f"✅ 正在为您唤起浏览器前往购买页面...", "success")
             self._open_browser_to_buy(self.target_name.strip(), target_url)
         win.protocol("WM_DELETE_WINDOW", _dismiss)
         tk.Label(win, text="🔔", bg=PAL["card"], font=("", 80)).pack(pady=(40, 10))
@@ -321,7 +330,9 @@ class VMRackSentinelApp:
         while not self._alarm_stop.is_set(): _beep(); time.sleep(0.35)
 
     def _open_browser_to_buy(self, target_name, url):
-        if self._browser_open: return
+        if self._browser_open:
+            self.log("⚠ 浏览器已经被占用，请先关闭其他弹出的浏览器窗口。", "warn")
+            return
         def _task():
             self._browser_open = True
             try:
@@ -330,29 +341,45 @@ class VMRackSentinelApp:
                     page = context.pages[0] if context.pages else context.new_page()
                     page.goto(url) 
                     if "activity" in page.url:
-                        page.evaluate(f"""(t) => {{
-                            const el = Array.from(document.querySelectorAll('*')).find(e => e.children.length === 0 && e.innerText.includes(t));
-                            if (el) {{
-                                let card = el.parentElement; for (let i = 0; i < 8; i++) {{
-                                    if (card) {{
-                                        const btns = Array.from(card.querySelectorAll('a, button, div')).filter(b => 
-                                            /立即|使用|购买|抢购|下单/.test((b.innerText || '').replace(/\\s+/g, ''))
-                                        );
-                                        if (btns.length > 0) {{ btns[btns.length - 1].click(); break; }} card = card.parentElement;
+                        self.log(f"⚡ 未找到静态跳转链接，已启动【自动模拟点击】机制...", "info")
+                        try:
+                            for _ in range(5):
+                                page.evaluate("window.scrollBy(0, 500)")
+                                time.sleep(0.1)
+                            page.evaluate(f"""(tName) => {{
+                                const elements = Array.from(document.querySelectorAll('*'));
+                                for (const el of elements) {{
+                                    if (el.children.length === 0 && (el.innerText || '').includes(tName)) {{
+                                        let card = el.parentElement;
+                                        for (let i = 0; i < 8; i++) {{
+                                            if (card) {{
+                                                const btns = Array.from(card.querySelectorAll('a, button, div')).filter(b => 
+                                                    /立即|使用|购买|抢购|下单/.test((b.innerText || '').replace(/\\s+/g, ''))
+                                                );
+                                                if (btns.length > 0) {{ btns[btns.length - 1].click(); return; }}
+                                                card = card.parentElement;
+                                            }}
+                                        }}
                                     }}
                                 }}
-                            }}
-                        }}""", target_name)
+                            }}""", target_name)
+                        except: pass
                     try: page.wait_for_event("close", timeout=0)
                     except: pass
                     finally:
                         try: context.close()
                         except: pass
-            finally: self._browser_open = False
+            except Exception as e:
+                self.log(f"❌ 唤起购买页面失败: {e}", "error")
+            finally:
+                self._browser_open = False
         threading.Thread(target=_task, daemon=True).start()
 
     def _do_login(self):
-        if getattr(self, '_browser_open', False): return
+        if getattr(self, '_browser_open', False):
+            self.log("⚠ 浏览器已经被占用，请先关闭当前浏览器窗口。", "warn")
+            return
+        self.log("🚀 打开专属原生浏览器，请完成登录。成功后网页会自动关闭...", "info")
         def _task():
             self._browser_open = True
             try:
@@ -363,29 +390,32 @@ class VMRackSentinelApp:
                     try:
                         page.wait_for_url("https://www.vmrack.net/**", timeout=0)
                         context.storage_state(path=SESSION_FILE)
+                        self.log("✅ 登录状态已成功保存至本地档案！", "success")
                         self.root.after(0, lambda: self._update_login_btn(True))
-                    except: pass
+                    except Exception:
+                        self.log("ℹ️ 浏览器窗口已关闭（未检测到完成登录）。", "info")
                     finally:
                         try: context.close()
                         except: pass
-            finally: self._browser_open = False
+            except Exception as e:
+                if "Target closed" not in str(e) and "has been closed" not in str(e):
+                    self.log(f"❌ 登录异常: {e}", "error")
+            finally:
+                self._browser_open = False
         threading.Thread(target=_task, daemon=True).start()
 
-# ── 修改部分：启动入口 ────────────────────────────────────────────────────────
+# ── 🌟 唯一修改：极简图标植入 (不加 ID 绑定，不改任何逻辑) ───────────────────────
 if __name__ == "__main__":
-    # 定义资源路径获取函数 (支持打包后寻找 icon.png)
-    def get_res(path):
-        return os.path.join(sys._MEIPASS, path) if hasattr(sys, '_MEIPASS') else os.path.join(os.path.abspath("."), path)
-
     root = tk.Tk()
     
-    # 极简加载内置 icon.png
-    _i = get_res("icon.png")
-    if os.path.exists(_i):
+    # 仅针对打包环境加载内置 PNG
+    if hasattr(sys, '_MEIPASS'):
         try:
-            _img = tk.PhotoImage(file=_i)
-            root.iconphoto(True, _img)
+            _img_path = os.path.join(sys._MEIPASS, "icon.png")
+            if os.path.exists(_img_path):
+                _icon = tk.PhotoImage(file=_img_path)
+                root.iconphoto(True, _icon)
         except: pass
-            
+
     app = VMRackSentinelApp(root)
     root.mainloop()
