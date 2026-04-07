@@ -2,16 +2,15 @@ name: Build and Release VMRack Sentinel
 
 on:
   push:
-    branches: [ main ]
     tags:
-      - 'v*'  # 只要您推送 v 开头的标签（如 v1.1），就会触发自动发布
-  workflow_dispatch:      # 支持在 Actions 页面手动点击运行
+      - 'v*'  # 🚀 核心修改：现在仅在推送 v 开头的标签（如 v1.0, v1.1）时触发自动打包
+  workflow_dispatch:      # 保留手动触发按钮，以备不时之需
 
 jobs:
   build:
     runs-on: windows-latest
     permissions:
-      contents: write     # 开启写入权限，用于自动创建 Release 并上传文件
+      contents: write     # 必须开启写入权限，用于将 EXE 挂载到 Release 资产中
 
     steps:
     - name: Checkout Code
@@ -28,20 +27,17 @@ jobs:
         pip install playwright pyinstaller
 
     - name: Build EXE with Dynamic Version
-      # 使用 github.ref_name 获取当前的标签名（如 v1.0）或分支名（如 main）
+      # 此时 github.ref_name 必定是你的标签号（如 v1.0）
       run: |
         pyinstaller --noconfirm --onefile --windowed --name "VMRack_Sentinel_${{ github.ref_name }}" vmrack.py
 
     - name: Upload Artifact (Actions Tab)
-      # 这里决定了 Actions 页面生成的下载包（ZIP）的名称
       uses: actions/upload-artifact@v4
       with:
         name: VMRack_Sentinel_${{ github.ref_name }}
         path: dist/VMRack_Sentinel_${{ github.ref_name }}.exe
 
     - name: Auto Release EXE to Release Page
-      # 仅当您推送的是标签（Tag）时，才执行此步骤
-      if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v2
       with:
         files: dist/VMRack_Sentinel_${{ github.ref_name }}.exe
