@@ -60,6 +60,15 @@ class VMRackSentinelApp:
         self.root.minsize(1250, 880)
         self.root.configure(bg=PAL["bg"])
 
+        # ── 加载自定义图标 ──
+        icon_path = os.path.join(_RUN_DIR, "icon.png")
+        if os.path.exists(icon_path):
+            try:
+                icon_img = tk.PhotoImage(file=icon_path)
+                self.root.iconphoto(True, icon_img)
+            except Exception as e:
+                print(f"图标加载失败: {e}")
+
         self.running            = False
         self.target_name        = ""
         self.target_iid         = None
@@ -195,7 +204,6 @@ class VMRackSentinelApp:
                 if not is_monitoring: self.log("📡 深度探测中，消除网页隐藏代码...", "info")
                 
                 results = page.evaluate("""async () => {
-                    // 🌟 绝杀修复 1：强行粉碎所有可能包含 JSON 乱码状态的隐藏标签
                     document.querySelectorAll('script, style, noscript, svg, template').forEach(el => el.remove());
 
                     for (let i = 0; i < 15; i++) { window.scrollTo(0, i * 600); await new Promise(r => setTimeout(r, 100)); }
@@ -206,10 +214,8 @@ class VMRackSentinelApp:
                     const seen = new Set();
                     const defaultUrl = 'https://www.vmrack.net/zh-CN/activity/2026-spring';
                     
-                    // 🌟 绝杀修复 2：只找网页里可见的、真正的按钮
                     const actionElements = Array.from(document.querySelectorAll('a, button, div, span')).filter(el => {
                         const txt = (el.innerText || '').replace(/\\s+/g, '');
-                        // 过滤条件：文字符合，且它里面不能再包含一大堆乱七八糟的子元素
                         return /立即使用|立即购买|立即下单|立即抢购|售罄|缺货|Sold/i.test(txt) && el.children.length <= 2;
                     });
 
@@ -220,13 +226,11 @@ class VMRackSentinelApp:
                         let card = btn.parentElement;
                         let title = null;
 
-                        // 往上找包裹着这个按钮的那个大方块（商品卡片）
                         for (let i = 0; i < 10; i++) {
                             if (!card || card === document.body) break;
                             const cTxt = card.innerText || '';
                             if (cTxt.includes('VPS')) {
                                 const lines = cTxt.split('\\n').map(l => l.trim()).filter(l => l);
-                                // 提取干净的套餐名称
                                 title = lines.find(l => l.includes('VPS') && !l.includes('{') && !l.includes('['));
                                 if (title) break;
                             }
@@ -237,7 +241,6 @@ class VMRackSentinelApp:
                             seen.add(title);
                             let url = defaultUrl;
 
-                            // 尝试找网址（哪怕找不到也没关系，我们还有自动点击大法）
                             const aNode = btn.closest('a[href]') || btn.querySelector('a[href]');
                             if (aNode) {
                                 url = aNode.href;
@@ -346,7 +349,6 @@ class VMRackSentinelApp:
         def _dismiss():
             self._alarm_stop.set(); self._dialog_showing = False; win.destroy()
             self.log(f"✅ 正在为您唤起浏览器前往购买页面...", "success")
-            # 将目标套餐的名称也传给底层，供自动点击魔法使用
             self._open_browser_to_buy(self.target_name.strip(), target_url)
 
         win.protocol("WM_DELETE_WINDOW", _dismiss)
@@ -376,24 +378,18 @@ class VMRackSentinelApp:
                     page = context.pages[0] if context.pages else context.new_page()
                     page.goto(url) 
                     
-                    # 🌟 绝杀修复 3：如果发现由于没有外链，又退回到了 activity 页面
-                    # 直接开启自动驾驶，代替用户在页面里搜寻卡片并强制点击！
                     if "activity" in page.url:
                         self.log(f"⚡ 未找到静态跳转链接，已启动【自动模拟点击】机制...", "info")
                         try:
-                            # 稍作滚动，防止商品在屏幕外
                             for _ in range(5):
                                 page.evaluate("window.scrollBy(0, 500)")
                                 time.sleep(0.1)
 
-                            # 注入自动点击 JS
                             clicked = page.evaluate(f"""(tName) => {{
                                 const elements = Array.from(document.querySelectorAll('*'));
                                 for (const el of elements) {{
-                                    // 找到包含套餐名字的那行文字
                                     if (el.children.length === 0 && (el.innerText || '').includes(tName)) {{
                                         let card = el.parentElement;
-                                        // 往上找包裹它的卡片容器，在这个容器里找购买按钮
                                         for (let i = 0; i < 8; i++) {{
                                             if (card) {{
                                                 const btns = Array.from(card.querySelectorAll('a, button, div')).filter(b => 
@@ -416,7 +412,7 @@ class VMRackSentinelApp:
                             else:
                                 self.log(f"⚠ 自动点击未命中，请您在网页中手动点击。", "warn")
                         except Exception as e:
-                            pass # 忽略自动点击产生的报错，不影响主流程
+                            pass 
 
                     try: page.wait_for_event("close", timeout=0)
                     except: pass
