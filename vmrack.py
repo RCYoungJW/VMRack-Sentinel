@@ -22,14 +22,12 @@ try:
 except ImportError:
     PLAYWRIGHT_OK = False
 
-# ── 路径与目录严格锁定 ────────────────────────────────────────────────────────
-# 获取当前 EXE 所在的确切位置
+# ── 路径与目录锁定逻辑 (确保安装在当前文件夹) ──────────────────────────────────────────
 if getattr(sys, 'frozen', False):
     _RUN_DIR = os.path.dirname(sys.executable)
 else:
     _RUN_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 全局环境变量锁死：强制安装到当前目录的 playwright_browsers 文件夹
 BROWSER_INSTALL_DIR = os.path.join(_RUN_DIR, "playwright_browsers")
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_INSTALL_DIR
 
@@ -40,10 +38,7 @@ def _beep():
     try:
         import winsound
         winsound.Beep(1800, 600)
-    except Exception:
-        try:
-            sys.stdout.write("\a"); sys.stdout.flush()
-        except Exception: pass
+    except Exception: pass
 
 def _sf(size, weight="normal"):
     families = ["SF Pro Text", "SF Pro Display", ".AppleSystemUIFont", "Segoe UI", "Arial"]
@@ -165,8 +160,8 @@ class VMRackSentinelApp:
         self.root.after(0, lambda: (self._status_dot.config(fg=color), self._status_lbl.config(text=text, fg=color)))
 
     def _auto_setup(self):
-        """完全避开 sys.executable，使用内部 Driver，根除死循环并锁定文件夹"""
         if not PLAYWRIGHT_OK: return
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_INSTALL_DIR
         try:
             with sync_playwright() as p:
                 try:
@@ -177,19 +172,20 @@ class VMRackSentinelApp:
                     self.log("⚠ 未检测到浏览器内核，正在后台配置到当前文件夹...", "warn")
                     self._set_status("环境配置中...", PAL["warn"])
                     
-                    # 🚀 核心修复：直接导入 Playwright 底层驱动可执行文件，不再使用 sys.executable
                     from playwright._impl._driver import compute_driver_executable
-                    driver_executable = compute_driver_executable()
+                    driver = compute_driver_executable()
+                    
+                    # 🚀 核心修复点：解析 Tuple，防止程序崩溃报错
+                    cmd = list(driver) if isinstance(driver, tuple) else [driver]
+                    cmd.extend(["install", "chromium"])
                     
                     si = subprocess.STARTUPINFO()
                     si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                    
                     env = os.environ.copy()
                     env["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_INSTALL_DIR
                     
-                    # 调用底层 Node 驱动直接拉取浏览器，彻底切断 EXE 死循环的根源
                     ret = subprocess.run(
-                        [driver_executable, "install", "chromium"],
+                        cmd, # 使用解析后的纯净列表
                         capture_output=True,
                         env=env,
                         startupinfo=si,
@@ -200,7 +196,7 @@ class VMRackSentinelApp:
                         self._env_ready = True
                         self.log("✅ 环境配置完成。", "success"); self._set_status("就绪", PAL["success"])
                     else:
-                        self.log("❌ 环境配置失败，请检查网络或权限。", "error")
+                        self.log("❌ 环境配置失败，请检查文件夹写入权限。", "error")
                         self._set_status("配置失败", PAL["danger"])
         except Exception as e:
             self.log(f"❌ 系统异常: {e}", "error")
@@ -233,7 +229,7 @@ class VMRackSentinelApp:
                     return data;
                 }""")
                 browser.close(); return results
-        except Exception as e: self.log(f"⚠ 扫描引擎异常: {e}", "warn"); return []
+        except Exception as e: self.log(f"⚠ 扫描异常: {e}", "warn"); return []
 
     def _scan_async(self):
         if not self._scan_lock.acquire(blocking=False): return
