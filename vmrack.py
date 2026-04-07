@@ -22,14 +22,11 @@ try:
 except ImportError:
     PLAYWRIGHT_OK = False
 
-# ── 路径与目录锁定逻辑 (确保安装在当前文件夹) ──────────────────────────────────────────
+# ── 路径与目录锁定逻辑 (确保配置保存在当前文件夹) ──────────────────────────────────────────
 if getattr(sys, 'frozen', False):
     _RUN_DIR = os.path.dirname(sys.executable)
 else:
     _RUN_DIR = os.path.dirname(os.path.abspath(__file__))
-
-BROWSER_INSTALL_DIR = os.path.join(_RUN_DIR, "playwright_browsers")
-os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_INSTALL_DIR
 
 SESSION_FILE = os.path.join(_RUN_DIR, "vm_login_state.json")
 ACTIVITY_URL = "https://www.vmrack.net/zh-CN/activity/2026-spring"
@@ -65,6 +62,7 @@ class VMRackSentinelApp:
         self.running            = False
         self.target_name        = ""
         self.target_iid         = None
+        self.package_urls       = {}  # 存储提取到的套餐专属购买链接
         self._alarm_stop        = threading.Event()
         self._dialog_lock       = threading.Lock()
         self._dialog_showing    = False
@@ -160,58 +158,25 @@ class VMRackSentinelApp:
         self.root.after(0, lambda: (self._status_dot.config(fg=color), self._status_lbl.config(text=text, fg=color)))
 
     def _auto_setup(self):
-        if not PLAYWRIGHT_OK: return
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_INSTALL_DIR
-        try:
-            with sync_playwright() as p:
-                try:
-                    p.chromium.launch().close()
-                    self._env_ready = True
-                    self.log("✅ Chromium 已就绪。", "success"); self._set_status("就绪", PAL["success"])
-                except Exception:
-                    self.log("⚠ 未检测到浏览器内核，正在后台配置到当前文件夹...", "warn")
-                    self._set_status("环境配置中...", PAL["warn"])
-                    
-                    from playwright._impl._driver import compute_driver_executable
-                    driver = compute_driver_executable()
-                    
-                    # 🚀 核心修复点：解析 Tuple，防止程序崩溃报错
-                    cmd = list(driver) if isinstance(driver, tuple) else [driver]
-                    cmd.extend(["install", "chromium"])
-                    
-                    si = subprocess.STARTUPINFO()
-                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                    env = os.environ.copy()
-                    env["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_INSTALL_DIR
-                    
-                    ret = subprocess.run(
-                        cmd, # 使用解析后的纯净列表
-                        capture_output=True,
-                        env=env,
-                        startupinfo=si,
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-                    )
-                    
-                    if ret.returncode == 0:
-                        self._env_ready = True
-                        self.log("✅ 环境配置完成。", "success"); self._set_status("就绪", PAL["success"])
-                    else:
-                        self.log("❌ 环境配置失败，请检查文件夹写入权限。", "error")
-                        self._set_status("配置失败", PAL["danger"])
-        except Exception as e:
-            self.log(f"❌ 系统异常: {e}", "error")
+        if not PLAYWRIGHT_OK:
+            self.log("❌ 未检测到 Playwright，请在终端执行: pip install playwright", "error")
+            self._set_status("环境缺失", PAL["danger"])
+            return
+
+        self._env_ready = True
+        self.log("✅ Playwright 环境就绪，将直接调用原生浏览器架构。", "success")
+        self._set_status("就绪", PAL["success"])
         
-        if self._env_ready:
-            self.root.after(0, lambda: (
-                self.btn_scan.config(state="normal"),
-                self.btn_monitor.config(state="normal", bg=PAL["accent"])
-            ))
+        self.root.after(0, lambda: (
+            self.btn_scan.config(state="normal"),
+            self.btn_monitor.config(state="normal", bg=PAL["accent"])
+        ))
 
     def _core_scanner(self, is_monitoring=False):
         if not self._env_ready: return []
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
+                browser = p.chromium.launch(channel="msedge", headless=True)
                 ctx_kwargs = {"storage_state": SESSION_FILE} if os.path.exists(SESSION_FILE) else {}
                 page = browser.new_context(no_viewport=True, **ctx_kwargs).new_page()
                 page.goto(ACTIVITY_URL, timeout=50000, wait_until="domcontentloaded")
@@ -224,7 +189,17 @@ class VMRackSentinelApp:
                         const raw = card.innerText || ''; if (!raw.includes('VPS') || !raw.includes('$')) return;
                         const nameLine = raw.split('\\n').find(l => l.includes('VPS'));
                         if (!nameLine || seen.has(nameLine)) return; seen.add(nameLine);
-                        data.push({ name: nameLine.trim(), status: (raw.includes('售罄') || raw.includes('Sold')) ? '❌ 售罄' : '✅ 有货' });
+                        
+                        // 获取购买链接逻辑
+                        let link = 'https://www.vmrack.net/zh-CN/activity/2026-spring';
+                        const aNode = card.querySelector('a');
+                        if (aNode && aNode.href) { link = aNode.href; }
+                        
+                        data.push({ 
+                            name: nameLine.trim(), 
+                            status: (raw.includes('售罄') || raw.includes('Sold')) ? '❌ 售罄' : '✅ 有货',
+                            url: link
+                        });
                     });
                     return data;
                 }""")
@@ -248,8 +223,10 @@ class VMRackSentinelApp:
         for i in self.tree.get_children(): self.tree.delete(i)
         if not items: return
         for idx, item in enumerate(items):
+            clean_name = item['name'].strip()
+            self.package_urls[clean_name] = item.get("url", ACTIVITY_URL) # 储存购买链接
             tag = ("stock" if "有货" in item["status"] else "sold",) + (("alt",) if idx % 2 == 1 else ())
-            self.tree.insert("", "end", values=(f"  {item['name']}", item["status"]), tags=tag)
+            self.tree.insert("", "end", values=(f"  {clean_name}", item["status"]), tags=tag)
         stock_cnt = sum(1 for i in items if "有货" in i["status"])
         self._count_lbl.config(text=f"{len(items)} 个套餐  ·  {stock_cnt} 个有货")
         if not self.running:
@@ -288,9 +265,15 @@ class VMRackSentinelApp:
         if self._dialog_showing: return
         self._dialog_showing = True; self._alarm_stop.clear(); threading.Thread(target=self._alarm_worker, daemon=True).start()
         win = tk.Toplevel(self.root); win.title("补货提醒"); win.geometry("960x650"); win.resizable(False, False); win.configure(bg=PAL["card"]); win.attributes("-topmost", True)
+        
+        # 提取目标套餐的专属购买链接
+        target_url = self.package_urls.get(self.target_name.strip(), ACTIVITY_URL)
+
         def _dismiss():
             self._alarm_stop.set(); self._dialog_showing = False; win.destroy()
-            self.log("✅ 告警已确认，可重新开始监测。", "success")
+            self.log("✅ 告警已确认，正在为您唤起浏览器前往购买页面...", "success")
+            self._open_browser_to_buy(target_url)
+
         win.protocol("WM_DELETE_WINDOW", _dismiss)
         tk.Label(win, text="🔔", bg=PAL["card"], font=("", 80)).pack(pady=(40, 10))
         tk.Label(win, text="目标套餐已补货！", bg=PAL["card"], font=_sf(28, "bold")).pack()
@@ -300,17 +283,60 @@ class VMRackSentinelApp:
     def _alarm_worker(self):
         while not self._alarm_stop.is_set(): _beep(); time.sleep(0.35)
 
-    def _do_login(self):
-        self.log("🚀 打开登录窗口，请在浏览器中完成登录...", "info")
+    def _open_browser_to_buy(self, url):
+        """调用持久化浏览器档案打开购买链接，确保处于已登录状态"""
         def _task():
             try:
                 with sync_playwright() as p:
-                    browser = p.chromium.launch(headless=False); page = browser.new_page()
-                    page.goto("https://www.vmrack.net/zh-CN/login")
-                    try: page.wait_for_url(lambda u: "/login" not in u, timeout=0)
-                    except: pass
-                    page.context.storage_state(path=SESSION_FILE); self.log("✅ 登录成功，Session 已保存。", "success"); browser.close()
-            except Exception as e: self.log(f"❌ 登录异常: {e}", "error")
+                    profile_path = os.path.join(_RUN_DIR, "vmrack_profile")
+                    context = p.chromium.launch_persistent_context(
+                        user_data_dir=profile_path,
+                        channel="msedge",
+                        headless=False,
+                        no_viewport=True
+                    )
+                    page = context.pages[0] if context.pages else context.new_page()
+                    page.goto(url)
+                    # 保持浏览器开启，由用户手动关闭
+                    page.wait_for_event("close", timeout=0)
+                    context.close()
+            except Exception as e:
+                self.log(f"❌ 唤起购买页面失败: {e}", "error")
+        threading.Thread(target=_task, daemon=True).start()
+
+    def _do_login(self):
+        self.log("🚀 打开专属原生浏览器，请完成登录。成功后网页会自动关闭...", "info")
+        def _task():
+            try:
+                with sync_playwright() as p:
+                    # 使用持久化上下文(Persistent Context)建立专属档案
+                    profile_path = os.path.join(_RUN_DIR, "vmrack_profile")
+                    context = p.chromium.launch_persistent_context(
+                        user_data_dir=profile_path,
+                        channel="msedge",
+                        headless=False,
+                        no_viewport=True
+                    )
+                    
+                    page = context.pages[0] if context.pages else context.new_page()
+                    
+                    # SSO 登录链接
+                    login_url = "https://sso.vmrack.net/sign-in?redirect=https%253A%252F%252Fwww.vmrack.net"
+                    page.goto(login_url)
+                    
+                    try:
+                        # 监测重定向，回到主站代表登录成功
+                        page.wait_for_url("https://www.vmrack.net/**", timeout=0)
+                    except Exception:
+                        pass
+                    
+                    # 保存 Session 文件供后台隐藏扫描使用
+                    context.storage_state(path=SESSION_FILE)
+                    self.log("✅ 登录状态已成功保存至本地档案！", "success")
+                    context.close()
+            except Exception as e:
+                if "Target closed" not in str(e) and "has been closed" not in str(e):
+                    self.log(f"❌ 登录异常: {e}", "error")
         threading.Thread(target=_task, daemon=True).start()
 
 if __name__ == "__main__":
