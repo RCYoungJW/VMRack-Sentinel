@@ -7,7 +7,7 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import ctypes
 
-# ── DPI 感知 (保持 4K 清晰) ──────────────────────────────────────────────────
+# ── DPI 感知 (保持清晰) ──────────────────────────────────────────────────
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
@@ -22,7 +22,7 @@ try:
 except ImportError:
     PLAYWRIGHT_OK = False
 
-# ── 路径与目录锁定逻辑 (确保配置保存在当前文件夹) ──────────────────────────────────────────
+# ── 路径与目录锁定逻辑 ──────────────────────────────────────────────────────────
 if getattr(sys, 'frozen', False):
     _RUN_DIR = os.path.dirname(sys.executable)
 else:
@@ -349,12 +349,12 @@ class VMRackSentinelApp:
                             page.evaluate(f"""(tName) => {{
                                 const elements = Array.from(document.querySelectorAll('*'));
                                 for (const el of elements) {{
-                                    if (el.children.length === 0 && (el.innerText || '').includes(tName)) {{
+                                    if (el && el.children.length === 0 && (el.innerText || '').includes(tName)) {{
                                         let card = el.parentElement;
                                         for (let i = 0; i < 8; i++) {{
                                             if (card) {{
                                                 const btns = Array.from(card.querySelectorAll('a, button, div')).filter(b => 
-                                                    /立即|使用|购买|抢购|下单/.test((b.innerText || '').replace(/\\s+/g, ''))
+                                                    /立即|使用|购买|抢购|下单/.test(((b.innerText || '').replace(/\\s+/g, '')))
                                                 );
                                                 if (btns.length > 0) {{ btns[btns.length - 1].click(); return; }}
                                                 card = card.parentElement;
@@ -364,7 +364,12 @@ class VMRackSentinelApp:
                                 }}
                             }}""", target_name)
                         except: pass
-                    try: page.wait_for_event("close", timeout=0)
+                    try: 
+                        page.wait_for_event("close", timeout=0)
+                        # 🌟 修复关键点：当浏览器关闭时，自动保存最新的登录状态到 json
+                        context.storage_state(path=SESSION_FILE)
+                        self.root.after(0, lambda: self._update_login_btn(True))
+                        self.log("✅ 已自动同步最新的登录状态。", "success")
                     except: pass
                     finally:
                         try: context.close()
@@ -386,7 +391,8 @@ class VMRackSentinelApp:
                 with sync_playwright() as p:
                     context = p.chromium.launch_persistent_context(user_data_dir=PROFILE_DIR, channel="msedge", headless=False, no_viewport=True)
                     page = context.pages[0] if context.pages else context.new_page()
-                    page.goto("https://sso.vmrack.net/sign-in?redirect=https%253A%252F%252Fwww.vmrack.net")
+                    login_url = "https://sso.vmrack.net/sign-in?redirect=https%253A%252F%252Fwww.vmrack.net"
+                    page.goto(login_url)
                     try:
                         page.wait_for_url("https://www.vmrack.net/**", timeout=0)
                         context.storage_state(path=SESSION_FILE)
@@ -404,11 +410,9 @@ class VMRackSentinelApp:
                 self._browser_open = False
         threading.Thread(target=_task, daemon=True).start()
 
-# ── 🌟 唯一修改：极简图标植入 (不加 ID 绑定，不改任何逻辑) ───────────────────────
 if __name__ == "__main__":
     root = tk.Tk()
-    
-    # 仅针对打包环境加载内置 PNG
+    # 🌟 图标逻辑：如果是打包环境，释放内置图标
     if hasattr(sys, '_MEIPASS'):
         try:
             _img_path = os.path.join(sys._MEIPASS, "icon.png")
@@ -416,6 +420,5 @@ if __name__ == "__main__":
                 _icon = tk.PhotoImage(file=_img_path)
                 root.iconphoto(True, _icon)
         except: pass
-
     app = VMRackSentinelApp(root)
     root.mainloop()
