@@ -276,9 +276,10 @@ class VMRackSentinelApp:
     def _toggle(self):
         if self.running:
             self.running = False; self.btn_monitor.config(text="开始监测", bg=PAL["accent"], fg="white")
-            self._set_status("就绪", PAL["success"]); return
+            self._set_status("就绪", PAL["success"]); self.log("⏹ 监测已手动停止。", "info"); return
+        if self._monitor_thread_active: return
         sel = self.tree.selection()
-        if not sel: return
+        if not sel: self.log("⚠ 请先在列表中选择一个套餐。", "warn"); return
         self.target_name = self.tree.item(sel[0])["values"][0].strip(); self.target_iid = sel[0]
         self.running = True; self.btn_monitor.config(text="停止监测", bg=PAL["danger"], fg="white")
         self._set_status(f"监测中：{self.target_name[:25]}...", PAL["accent"])
@@ -305,15 +306,16 @@ class VMRackSentinelApp:
     def _show_alert(self):
         if self._dialog_showing: return
         self._dialog_showing = True; self._alarm_stop.clear(); threading.Thread(target=self._alarm_worker, daemon=True).start()
-        win = tk.Toplevel(self.root); win.title("补货提醒"); win.geometry("960x650"); win.attributes("-topmost", True)
+        win = tk.Toplevel(self.root); win.title("补货提醒"); win.geometry("960x650"); win.resizable(False, False); win.configure(bg=PAL["card"]); win.attributes("-topmost", True)
         target_url = self.package_urls.get(self.target_name.strip(), ACTIVITY_URL)
         def _dismiss():
             self._alarm_stop.set(); self._dialog_showing = False; win.destroy()
             self._open_browser_to_buy(self.target_name.strip(), target_url)
         win.protocol("WM_DELETE_WINDOW", _dismiss)
-        tk.Label(win, text="🔔 目标套餐已补货！", font=_sf(28, "bold")).pack(pady=40)
-        tk.Label(win, text=self.target_name.strip(), font=_sf(18)).pack(pady=15)
-        tk.Button(win, text="我知道了，立即下单", command=_dismiss, font=_sf(16, "bold"), fg="white", bg=PAL["accent"], padx=80, pady=18).pack(pady=40)
+        tk.Label(win, text="🔔", bg=PAL["card"], font=("", 80)).pack(pady=(40, 10))
+        tk.Label(win, text="目标套餐已补货！", bg=PAL["card"], font=_sf(28, "bold")).pack()
+        tk.Label(win, text=self.target_name.strip(), bg=PAL["card"], fg=PAL["subtext"], font=_sf(18), wraplength=800).pack(pady=(15, 30))
+        tk.Button(win, text="我知道了，立即下单", command=_dismiss, font=_sf(16, "bold"), fg="white", bg=PAL["accent"], relief="flat", bd=0, padx=80, pady=18).pack(pady=(0, 40))
 
     def _alarm_worker(self):
         while not self._alarm_stop.is_set(): _beep(); time.sleep(0.35)
@@ -331,10 +333,12 @@ class VMRackSentinelApp:
                         page.evaluate(f"""(t) => {{
                             const el = Array.from(document.querySelectorAll('*')).find(e => e.children.length === 0 && e.innerText.includes(t));
                             if (el) {{
-                                let c = el.parentElement; for (let i = 0; i < 8; i++) {{
-                                    if (c) {{
-                                        const b = Array.from(c.querySelectorAll('a, button, div')).find(x => /立即|使用|购买|抢购|下单/.test(x.innerText.replace(/\\s+/g, '')));
-                                        if (b) {{ b.click(); break; }} c = c.parentElement;
+                                let card = el.parentElement; for (let i = 0; i < 8; i++) {{
+                                    if (card) {{
+                                        const btns = Array.from(card.querySelectorAll('a, button, div')).filter(b => 
+                                            /立即|使用|购买|抢购|下单/.test((b.innerText || '').replace(/\\s+/g, ''))
+                                        );
+                                        if (btns.length > 0) {{ btns[btns.length - 1].click(); break; }} card = card.parentElement;
                                     }}
                                 }}
                             }}
@@ -367,21 +371,20 @@ class VMRackSentinelApp:
             finally: self._browser_open = False
         threading.Thread(target=_task, daemon=True).start()
 
-# ── 🌟 修改部分：仅增加图标加载逻辑 ──────────────────────────────────────────────────
+# ── 修改部分：启动入口 ────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # 防止任务栏显示 Python 默认羽毛
-    try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("VMRack.Sentinel.v1")
-    except: pass
+    # 定义资源路径获取函数 (支持打包后寻找 icon.png)
+    def get_res(path):
+        return os.path.join(sys._MEIPASS, path) if hasattr(sys, '_MEIPASS') else os.path.join(os.path.abspath("."), path)
 
     root = tk.Tk()
     
-    # 尝试加载本地 icon.png
-    icon_path = os.path.join(_RUN_DIR, "icon.png")
-    if os.path.exists(icon_path):
+    # 极简加载内置 icon.png
+    _i = get_res("icon.png")
+    if os.path.exists(_i):
         try:
-            img = tk.PhotoImage(file=icon_path)
-            root.iconphoto(True, img)
+            _img = tk.PhotoImage(file=_i)
+            root.iconphoto(True, _img)
         except: pass
             
     app = VMRackSentinelApp(root)
