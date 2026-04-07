@@ -22,25 +22,17 @@ try:
 except ImportError:
     PLAYWRIGHT_OK = False
 
-# ── 路径常量 (适配 GitHub 打包与 EXE 运行) ─────────────────────────────────────────
-def _get_browser_path():
-    if getattr(sys, 'frozen', False):
-        base = os.path.dirname(sys.executable)
-    else:
-        base = os.path.dirname(os.path.abspath(__file__))
-    user_home = os.path.expanduser("~")
-    candidates = [os.path.join(base, "playwright_browsers"), os.path.join(user_home, "AppData", "Local", "ms-playwright")]
-    for p in candidates:
-        if p and os.path.exists(p):
-            try:
-                if any(d.startswith("chromium-") for d in os.listdir(p)):
-                    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = p
-                    return p
-            except Exception: continue
-    return os.path.join(base, "playwright_browsers")
+# ── 路径与目录锁定逻辑 (确保安装在当前文件夹) ──────────────────────────────────────────
+# 1. 确定程序运行的根目录
+if getattr(sys, 'frozen', False):
+    _RUN_DIR = os.path.dirname(sys.executable)
+else:
+    _RUN_DIR = os.path.dirname(os.path.abspath(__file__))
 
-BROWSER_PATH = _get_browser_path()
-_RUN_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+# 2. 强制锁定浏览器安装在当前目录下的 playwright_browsers 文件夹
+BROWSER_INSTALL_DIR = os.path.join(_RUN_DIR, "playwright_browsers")
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_INSTALL_DIR
+
 SESSION_FILE = os.path.join(_RUN_DIR, "vm_login_state.json")
 ACTIVITY_URL = "https://www.vmrack.net/zh-CN/activity/2026-spring"
 
@@ -48,10 +40,7 @@ def _beep():
     try:
         import winsound
         winsound.Beep(1800, 600)
-    except Exception:
-        try:
-            sys.stdout.write("\a"); sys.stdout.flush()
-        except Exception: pass
+    except Exception: pass
 
 def _sf(size, weight="normal"):
     families = ["SF Pro Text", "SF Pro Display", ".AppleSystemUIFont", "Segoe UI", "Arial"]
@@ -83,13 +72,12 @@ class VMRackSentinelApp:
         self._dialog_showing    = False
         self._scan_lock         = threading.Lock()
         self._monitor_thread_active = False 
+        self._env_ready         = False 
 
         self._setup_styles()
         self._build_ui()
 
-        # 🌟 找回启动提示：确保打开软件即有反馈
         self.log("🚀 Sentinel 系统初始化完成", "success")
-
         threading.Thread(target=self._auto_setup, daemon=True).start()
 
     def _setup_styles(self):
@@ -116,7 +104,7 @@ class VMRackSentinelApp:
         tk.Label(brand, text="Sentinel", bg=PAL["card"], fg=PAL["text"], font=_sf(17, "bold")).pack(side="left")
         self._status_dot = tk.Label(brand, text="●", bg=PAL["card"], fg=PAL["subtext"], font=_sf(10))
         self._status_dot.pack(side="left", padx=(10, 0), pady=2)
-        self._status_lbl = tk.Label(brand, text="就绪", bg=PAL["card"], fg=PAL["subtext"], font=_sf(10))
+        self._status_lbl = tk.Label(brand, text="检查环境中...", bg=PAL["card"], fg=PAL["subtext"], font=_sf(10))
         self._status_lbl.pack(side="left", padx=(2, 0))
 
         btns = tk.Frame(top, bg=PAL["card"])
@@ -125,17 +113,17 @@ class VMRackSentinelApp:
         self.btn_scan    = self._pill_btn(btns, "全量扫描",   self._scan_async, ghost=True)
         self.btn_monitor = self._pill_btn(btns, "开始监测",   self._toggle,     ghost=False)
         self.btn_login.pack(side="left", padx=(0, 12)); self.btn_scan.pack(side="left", padx=(0, 12)); self.btn_monitor.pack(side="left")
+        
+        self.btn_scan.config(state="disabled")
         self.btn_monitor.config(state="disabled", bg="#D1D1D6", fg="white", disabledforeground="white")
 
         # ── 列表区 ──
         list_wrap = tk.Frame(root, bg=PAL["card"], highlightthickness=1, highlightbackground=PAL["border"])
         list_wrap.grid(row=1, column=0, sticky="nsew", padx=20, pady=(12, 0))
         list_wrap.columnconfigure(0, weight=1); list_wrap.rowconfigure(1, weight=1)
-        list_hdr = tk.Frame(list_wrap, bg=PAL["card"]); list_hdr.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 4))
-        tk.Label(list_hdr, text="套餐列表", bg=PAL["card"], fg=PAL["text"], font=_sf(13, "bold")).pack(side="left")
-        self._count_lbl = tk.Label(list_hdr, text="", bg=PAL["card"], fg=PAL["subtext"], font=_sf(11)); self._count_lbl.pack(side="left", padx=8)
-
-        tv_frame = tk.Frame(list_wrap, bg=PAL["card"]); tv_frame.grid(row=1, column=0, sticky="nsew", padx=0, pady=(0, 4))
+        tk.Label(list_wrap, text="套餐列表", bg=PAL["card"], fg=PAL["text"], font=_sf(13, "bold")).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 4))
+        
+        tv_frame = tk.Frame(list_wrap, bg=PAL["card"]); tv_frame.grid(row=1, column=0, sticky="nsew")
         tv_frame.columnconfigure(0, weight=1); tv_frame.rowconfigure(0, weight=1)
         self.tree = ttk.Treeview(tv_frame, columns=("name", "status"), show="headings", style="Mac.Treeview", selectmode="browse")
         self.tree.heading("name", text="  套餐名称"); self.tree.heading("status", text="状态")
@@ -145,13 +133,11 @@ class VMRackSentinelApp:
         vsb.grid(row=0, column=1, sticky="ns"); self.tree.configure(yscrollcommand=vsb.set)
         self.tree.tag_configure("stock", foreground=PAL["success"]); self.tree.tag_configure("sold", foreground=PAL["danger"]); self.tree.tag_configure("alt", background=PAL["row_alt"])
 
-        # ── 分割线 ──
+        # ── 日志区 ──
         sep_frame = tk.Frame(root, bg=PAL["card"]); sep_frame.grid(row=2, column=0, sticky="ew", padx=20, pady=(8, 0))
         tk.Frame(sep_frame, bg=PAL["border"], height=1).pack(fill="x")
-        log_hdr = tk.Frame(sep_frame, bg=PAL["card"]); log_hdr.pack(fill="x", padx=16, pady=(8, 4))
-        tk.Label(log_hdr, text="系统日志", bg=PAL["card"], fg=PAL["text"], font=_sf(13, "bold")).pack(side="left")
+        tk.Label(sep_frame, text="系统日志", bg=PAL["card"], fg=PAL["text"], font=_sf(13, "bold")).pack(side="left", padx=16, pady=(8, 4))
 
-        # ── 日志区 ──
         log_wrap = tk.Frame(root, bg=PAL["card"], highlightthickness=1, highlightbackground=PAL["border"])
         log_wrap.grid(row=3, column=0, sticky="nsew", padx=20, pady=(0, 16))
         log_wrap.columnconfigure(0, weight=1); log_wrap.rowconfigure(0, weight=1)
@@ -170,27 +156,62 @@ class VMRackSentinelApp:
         ts = time.strftime("%H:%M:%S")
         self.log_box.config(state="normal")
         self.log_box.insert(tk.END, f"[{ts}]  {text}\n", level); self.log_box.see(tk.END); self.log_box.config(state="disabled")
-        self.root.update_idletasks() # 强制 UI 立即重绘
+        self.root.update_idletasks()
 
     def _set_status(self, text: str, color=None):
         color = color or PAL["subtext"]
         self.root.after(0, lambda: (self._status_dot.config(fg=color), self._status_lbl.config(text=text, fg=color)))
 
     def _auto_setup(self):
+        """核心修复：确保安装和读取路径严格锁定在当前所在文件夹"""
         if not PLAYWRIGHT_OK: return
+        
+        # 再次确保环境变量在线程内也生效
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_INSTALL_DIR
+        
         try:
             with sync_playwright() as p:
                 try:
                     p.chromium.launch().close()
-                    # 严格按照参考代码文案
+                    self._env_ready = True
                     self.log("✅ Chromium 已就绪。", "success"); self._set_status("就绪", PAL["success"])
                 except Exception:
-                    self.log("⚠ Chromium 未检测到，正在安装...", "warn"); self._set_status("安装中...", PAL["warn"])
-                    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], capture_output=True)
-                    self.log("✅ Chromium 安装完成。", "success"); self._set_status("就绪", PAL["success"])
-        except Exception: pass
+                    self.log("⚠ 未检测到浏览器内核，正在后台配置到当前文件夹...", "warn")
+                    self._set_status("环境配置中...", PAL["warn"])
+                    
+                    # 设定静默安装参数
+                    si = subprocess.STARTUPINFO()
+                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    
+                    # 关键：显式设置执行环境中的路径变量
+                    env = os.environ.copy()
+                    env["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_INSTALL_DIR
+                    
+                    ret = subprocess.run(
+                        [sys.executable, "-m", "playwright", "install", "chromium"],
+                        capture_output=True,
+                        env=env,
+                        startupinfo=si,
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                    )
+                    
+                    if ret.returncode == 0:
+                        self._env_ready = True
+                        self.log("✅ 环境配置完成。", "success"); self._set_status("就绪", PAL["success"])
+                    else:
+                        self.log("❌ 环境配置失败，请检查文件夹写入权限。", "error")
+                        self._set_status("配置失败", PAL["danger"])
+        except Exception as e:
+            self.log(f"❌ 系统异常: {e}", "error")
+        
+        if self._env_ready:
+            self.root.after(0, lambda: (
+                self.btn_scan.config(state="normal"),
+                self.btn_monitor.config(state="normal", bg=PAL["accent"])
+            ))
 
     def _core_scanner(self, is_monitoring=False):
+        if not self._env_ready: return []
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
@@ -206,13 +227,12 @@ class VMRackSentinelApp:
                         const raw = card.innerText || ''; if (!raw.includes('VPS') || !raw.includes('$')) return;
                         const nameLine = raw.split('\\n').find(l => l.includes('VPS'));
                         if (!nameLine || seen.has(nameLine)) return; seen.add(nameLine);
-                        const isSold = ['售罄', 'Sold'].some(k => raw.includes(k));
-                        data.push({ name: nameLine.trim(), status: isSold ? '❌ 售罄' : '✅ 有货' });
+                        data.push({ name: nameLine.trim(), status: (raw.includes('售罄') || raw.includes('Sold')) ? '❌ 售罄' : '✅ 有货' });
                     });
                     return data;
                 }""")
                 browser.close(); return results
-        except Exception as e: self.log(f"⚠ 扫描引擎异常: {e}", "warn"); return []
+        except Exception as e: self.log(f"⚠ 扫描异常: {e}", "warn"); return []
 
     def _scan_async(self):
         if not self._scan_lock.acquire(blocking=False): return
@@ -264,11 +284,8 @@ class VMRackSentinelApp:
                 if "有货" in match["status"]:
                     self.running = False; self.root.after(0, self._show_alert); break
             time.sleep(5)
-        
-        # 🌟 修复关键：线程结束前，将 UI 强制重置
-        self._set_status("监测已结束", PAL["subtext"])
         self.root.after(0, lambda: self.btn_monitor.config(text="开始监测", bg=PAL["accent"], fg="white"))
-        self._monitor_thread_active = False
+        self._set_status("监测已结束", PAL["subtext"]); self._monitor_thread_active = False
 
     def _show_alert(self):
         if self._dialog_showing: return
@@ -277,7 +294,6 @@ class VMRackSentinelApp:
         def _dismiss():
             self._alarm_stop.set(); self._dialog_showing = False; win.destroy()
             self.log("✅ 告警已确认，可重新开始监测。", "success")
-            self.root.after(0, lambda: self.btn_monitor.config(text="开始监测", bg=PAL["accent"], fg="white"))
         win.protocol("WM_DELETE_WINDOW", _dismiss)
         tk.Label(win, text="🔔", bg=PAL["card"], font=("", 80)).pack(pady=(40, 10))
         tk.Label(win, text="目标套餐已补货！", bg=PAL["card"], font=_sf(28, "bold")).pack()
