@@ -29,7 +29,8 @@ jobs:
     - name: Build EXE with Dynamic Version
       # 此时 github.ref_name 必定是你的标签号（如 v1.0）
       run: |
-        pyinstaller --noconfirm --onefile --windowed --name "VMRack_Sentinel_${{ github.ref_name }}" vmrack.py
+        # 🚀 在这里加入了 --icon=icon.ico 参数
+        pyinstaller --noconfirm --onefile --windowed --icon=icon.ico --name "VMRack_Sentinel_${{ github.ref_name }}" vmrack.py
 
     - name: Upload Artifact (Actions Tab)
       uses: actions/upload-artifact@v4
