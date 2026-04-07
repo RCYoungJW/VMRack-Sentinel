@@ -7,11 +7,9 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import ctypes
 
-# ── 核心修复：资源定位函数 (确保打包后能从 EXE 内部掏出图标) ───────────────────────
+# ── 💡 仅新增：资源定位函数 (确保打包后能从 EXE 内部掏出图标) ───────────────────────
 def resource_path(relative_path):
-    """ 获取程序运行时的资源路径，兼容 PyInstaller 打包后的临时目录 """
     try:
-        # PyInstaller 打包后会创建临时管理目录 _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
         base_path = os.path.dirname(os.path.abspath(__file__))
@@ -32,7 +30,7 @@ try:
 except ImportError:
     PLAYWRIGHT_OK = False
 
-# ── 路径与目录锁定逻辑 ──────────────────────────────────────────────────────────
+# ── 路径与目录锁定逻辑 (确保配置保存在当前文件夹) ──────────────────────────────────────────
 if getattr(sys, 'frozen', False):
     _RUN_DIR = os.path.dirname(sys.executable)
 else:
@@ -208,23 +206,19 @@ class VMRackSentinelApp:
                     document.querySelectorAll('script, style, noscript, svg, template').forEach(el => el.remove());
                     for (let i = 0; i < 15; i++) { window.scrollTo(0, i * 600); await new Promise(r => setTimeout(r, 100)); }
                     await new Promise(r => setTimeout(r, 1500));
-                    
                     const isLoggedOut = !!document.querySelector('a[href*="/login"], a[href*="sign-in"]');
                     const data = [];
                     const seen = new Set();
                     const defaultUrl = 'https://www.vmrack.net/zh-CN/activity/2026-spring';
-                    
                     const actionElements = Array.from(document.querySelectorAll('a, button, div, span')).filter(el => {
                         const txt = (el.innerText || '').replace(/\\s+/g, '');
                         return /立即使用|立即购买|立即下单|立即抢购|售罄|缺货|Sold/i.test(txt) && el.children.length <= 2;
                     });
-
                     for (const btn of actionElements) {
                         const btnTxt = (btn.innerText || '').replace(/\\s+/g, '');
                         const isSoldOut = /售罄|缺货|Sold/i.test(btnTxt);
                         let card = btn.parentElement;
                         let title = null;
-
                         for (let i = 0; i < 10; i++) {
                             if (!card || card === document.body) break;
                             const cTxt = card.innerText || '';
@@ -235,7 +229,6 @@ class VMRackSentinelApp:
                             }
                             card = card.parentElement;
                         }
-
                         if (title && !seen.has(title)) {
                             seen.add(title);
                             let url = defaultUrl;
@@ -294,22 +287,28 @@ class VMRackSentinelApp:
             self._set_status("就绪", PAL["success"]); return
         sel = self.tree.selection()
         if not sel: return
-        self.target_name = self.tree.item(sel[0])["values"][0].strip()
+        self.target_name = self.tree.item(sel[0])["values"][0].strip(); self.target_iid = sel[0]
         self.running = True; self.btn_monitor.config(text="停止监测", bg=PAL["danger"], fg="white")
         self._set_status(f"监测中：{self.target_name[:25]}...", PAL["accent"])
         threading.Thread(target=self._monitor_loop, daemon=True).start()
 
     def _monitor_loop(self):
+        self._monitor_thread_active = True
         while self.running:
             results = self._core_scanner(is_monitoring=True)
             if not self.running: break
+            expired = results.get("expired", False)
             items = results.get("items", [])
+            self.root.after(0, lambda e=expired: self._update_login_btn(not e))
             match = next((r for r in items if r["name"].strip() == self.target_name.strip()), None)
-            if match and "有货" in match["status"]:
+            if match:
                 self.package_urls[self.target_name.strip()] = match.get("url", ACTIVITY_URL)
-                self.running = False; self.root.after(0, self._show_alert); break
+                self.root.after(0, lambda: self._handle_scan_result(expired, items))
+                if "有货" in match["status"]:
+                    self.running = False; self.root.after(0, self._show_alert); break
             time.sleep(5)
         self.root.after(0, lambda: self.btn_monitor.config(text="开始监测", bg=PAL["accent"], fg="white"))
+        self._monitor_thread_active = False
 
     def _show_alert(self):
         if self._dialog_showing: return
@@ -340,10 +339,11 @@ class VMRackSentinelApp:
                         page.evaluate(f"""(t) => {{
                             const el = Array.from(document.querySelectorAll('*')).find(e => e.children.length === 0 && e.innerText.includes(t));
                             if (el) {{
-                                let c = el.parentElement; for (let i=0; i<8; i++) {{
-                                    if (!c) break;
-                                    const b = Array.from(c.querySelectorAll('a, button, div')).find(x => /立即|使用|购买|抢购|下单/.test(x.innerText.replace(/\\s+/g, '')));
-                                    if (b) {{ b.click(); break; }} c = c.parentElement;
+                                let c = el.parentElement; for (let i = 0; i < 8; i++) {{
+                                    if (c) {{
+                                        const b = Array.from(c.querySelectorAll('a, button, div')).find(x => /立即|使用|购买|抢购|下单/.test(x.innerText.replace(/\\s+/g, '')));
+                                        if (b) {{ b.click(); break; }} c = c.parentElement;
+                                    }}
                                 }}
                             }}
                         }}""", target_name)
@@ -375,23 +375,21 @@ class VMRackSentinelApp:
             finally: self._browser_open = False
         threading.Thread(target=_task, daemon=True).start()
 
-# ── 启动入口 ──────────────────────────────────────────────────────────────
+# ── 🌟 仅新增：启动入口图标逻辑 ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # 🌟 核心修复 1：Windows 任务栏 ID 绑定 (防止变回羽毛)
+    # 强制绑定任务栏 ID，防止显示 Python 默认图标
     try:
-        myappid = 'VMRack.Sentinel.Monitor.v1'
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("VMRack.Sentinel.v1")
     except: pass
 
     root = tk.Tk()
     
-    # 🌟 核心修复 2：根窗口全局图标加载 (确保所有窗口生效)
-    # 使用 resource_path 确保打包后依然能从内部找到图片
+    # 自动定位内部图标文件
     png_path = resource_path("icon.png")
     if os.path.exists(png_path):
         try:
             img = tk.PhotoImage(file=png_path)
-            # 设置为 True 使其应用到所有子窗口
+            # 设置为 True 使图标应用到所有未来弹出的子窗口
             root.iconphoto(True, img)
         except: pass
             
