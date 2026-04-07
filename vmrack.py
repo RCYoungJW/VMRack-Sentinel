@@ -70,7 +70,7 @@ class VMRackSentinelApp:
         self._scan_lock         = threading.Lock()
         self._monitor_thread_active = False 
         self._env_ready         = False 
-        self._browser_open      = False # 新增：浏览器占用锁，防止死锁报错
+        self._browser_open      = False 
 
         self._setup_styles()
         self._build_ui()
@@ -111,7 +111,6 @@ class VMRackSentinelApp:
         self.btn_monitor = self._pill_btn(btns, "开始监测",   self._toggle,     ghost=False)
         self.btn_login.pack(side="left", padx=(0, 12)); self.btn_scan.pack(side="left", padx=(0, 12)); self.btn_monitor.pack(side="left")
         
-        # 修复1：只认 Session 文件，不认文件夹，防止假登录判定
         if os.path.exists(SESSION_FILE):
             self._update_login_btn(is_logged_in=True)
 
@@ -151,7 +150,6 @@ class VMRackSentinelApp:
         return tk.Button(parent, text=text, command=cmd, font=_sf(12, "bold"), fg="white", bg=PAL["accent"], activeforeground="white", disabledforeground="white", relief="flat", bd=0, padx=26, pady=7, cursor="hand2")
 
     def _update_login_btn(self, is_logged_in):
-        """动态更新登录按钮的文字和颜色"""
         if is_logged_in:
             self.btn_login.config(text="✅ 已登录", fg=PAL["success"])
         else:
@@ -186,7 +184,6 @@ class VMRackSentinelApp:
         ))
 
     def _core_scanner(self, is_monitoring=False):
-        """返回字典结构: {'expired': bool, 'items': list}"""
         if not self._env_ready: return {"expired": False, "items": []}
         try:
             with sync_playwright() as p:
@@ -195,30 +192,66 @@ class VMRackSentinelApp:
                 page = browser.new_context(no_viewport=True, **ctx_kwargs).new_page()
                 page.goto(ACTIVITY_URL, timeout=50000, wait_until="domcontentloaded")
                 
-                if not is_monitoring: self.log("📡 深度探测中，滚动加载全量数据...", "info")
+                if not is_monitoring: self.log("📡 深度探测中，消除网页隐藏代码...", "info")
                 
                 results = page.evaluate("""async () => {
-                    for (let i = 0; i < 20; i++) { window.scrollTo(0, i * 600); await new Promise(r => setTimeout(r, 120)); }
-                    await new Promise(r => setTimeout(r, 1800));
+                    // 🌟 绝杀修复 1：强行粉碎所有可能包含 JSON 乱码状态的隐藏标签
+                    document.querySelectorAll('script, style, noscript, svg, template').forEach(el => el.remove());
+
+                    for (let i = 0; i < 15; i++) { window.scrollTo(0, i * 600); await new Promise(r => setTimeout(r, 100)); }
+                    await new Promise(r => setTimeout(r, 1500));
                     
                     const isLoggedOut = !!document.querySelector('a[href*="/login"], a[href*="sign-in"]');
+                    const data = [];
+                    const seen = new Set();
+                    const defaultUrl = 'https://www.vmrack.net/zh-CN/activity/2026-spring';
                     
-                    const data = []; const seen = new Set();
-                    document.querySelectorAll('div, section, article').forEach(card => {
-                        const raw = card.innerText || ''; if (!raw.includes('VPS') || !raw.includes('$')) return;
-                        const nameLine = raw.split('\\n').find(l => l.includes('VPS'));
-                        if (!nameLine || seen.has(nameLine)) return; seen.add(nameLine);
-                        
-                        let link = 'https://www.vmrack.net/zh-CN/activity/2026-spring';
-                        const aNode = card.querySelector('a');
-                        if (aNode && aNode.href) { link = aNode.href; }
-                        
-                        data.push({ 
-                            name: nameLine.trim(), 
-                            status: (raw.includes('售罄') || raw.includes('Sold')) ? '❌ 售罄' : '✅ 有货',
-                            url: link
-                        });
+                    // 🌟 绝杀修复 2：只找网页里可见的、真正的按钮
+                    const actionElements = Array.from(document.querySelectorAll('a, button, div, span')).filter(el => {
+                        const txt = (el.innerText || '').replace(/\\s+/g, '');
+                        // 过滤条件：文字符合，且它里面不能再包含一大堆乱七八糟的子元素
+                        return /立即使用|立即购买|立即下单|立即抢购|售罄|缺货|Sold/i.test(txt) && el.children.length <= 2;
                     });
+
+                    for (const btn of actionElements) {
+                        const btnTxt = (btn.innerText || '').replace(/\\s+/g, '');
+                        const isSoldOut = /售罄|缺货|Sold/i.test(btnTxt);
+
+                        let card = btn.parentElement;
+                        let title = null;
+
+                        // 往上找包裹着这个按钮的那个大方块（商品卡片）
+                        for (let i = 0; i < 10; i++) {
+                            if (!card || card === document.body) break;
+                            const cTxt = card.innerText || '';
+                            if (cTxt.includes('VPS')) {
+                                const lines = cTxt.split('\\n').map(l => l.trim()).filter(l => l);
+                                // 提取干净的套餐名称
+                                title = lines.find(l => l.includes('VPS') && !l.includes('{') && !l.includes('['));
+                                if (title) break;
+                            }
+                            card = card.parentElement;
+                        }
+
+                        if (title && !seen.has(title)) {
+                            seen.add(title);
+                            let url = defaultUrl;
+
+                            // 尝试找网址（哪怕找不到也没关系，我们还有自动点击大法）
+                            const aNode = btn.closest('a[href]') || btn.querySelector('a[href]');
+                            if (aNode) {
+                                url = aNode.href;
+                            } else if (card) {
+                                const allLinks = Array.from(card.querySelectorAll('a[href]'));
+                                const buyLink = allLinks.find(a => /cart|pid|buy|order|checkout/i.test(a.href));
+                                if (buyLink) url = buyLink.href;
+                                else if (allLinks.length > 0) url = allLinks[allLinks.length - 1].href;
+                            }
+
+                            if (url.startsWith('/')) url = window.location.origin + url;
+                            data.push({ name: title, status: isSoldOut ? '❌ 售罄' : '✅ 有货', url: url });
+                        }
+                    }
                     return { expired: isLoggedOut, items: data };
                 }""")
                 browser.close()
@@ -245,7 +278,6 @@ class VMRackSentinelApp:
             self.root.after(0, lambda: self.btn_scan.config(state="normal"))
 
     def _handle_scan_result(self, expired, items):
-        """统一处理扫描结果并同步UI状态"""
         self._update_login_btn(not expired)
         if expired and self.btn_login.cget("text") != "登录账号":
             self.log("⚠ 发现登录状态已失效，部分抢购可能受限，请重新登录！", "warn")
@@ -294,6 +326,7 @@ class VMRackSentinelApp:
 
             match = next((r for r in items if r["name"].strip() == self.target_name.strip()), None)
             if match:
+                self.package_urls[self.target_name.strip()] = match.get("url", ACTIVITY_URL)
                 self.log(f"↻ 轮询结果：{self.target_name}  →  {match['status']}", "info")
                 self.root.after(0, lambda: self._handle_scan_result(expired, items))
                 if "有货" in match["status"]:
@@ -312,8 +345,9 @@ class VMRackSentinelApp:
 
         def _dismiss():
             self._alarm_stop.set(); self._dialog_showing = False; win.destroy()
-            self.log("✅ 告警已确认，正在为您唤起浏览器前往购买页面...", "success")
-            self._open_browser_to_buy(target_url)
+            self.log(f"✅ 正在为您唤起浏览器前往购买页面...", "success")
+            # 将目标套餐的名称也传给底层，供自动点击魔法使用
+            self._open_browser_to_buy(self.target_name.strip(), target_url)
 
         win.protocol("WM_DELETE_WINDOW", _dismiss)
         tk.Label(win, text="🔔", bg=PAL["card"], font=("", 80)).pack(pady=(40, 10))
@@ -324,8 +358,7 @@ class VMRackSentinelApp:
     def _alarm_worker(self):
         while not self._alarm_stop.is_set(): _beep(); time.sleep(0.35)
 
-    def _open_browser_to_buy(self, url):
-        # 修复2：增加占用锁检查，防止双开报错死锁
+    def _open_browser_to_buy(self, target_name, url):
         if self._browser_open:
             self.log("⚠ 浏览器已经被占用，请先关闭其他弹出的浏览器窗口。", "warn")
             return
@@ -341,8 +374,50 @@ class VMRackSentinelApp:
                         no_viewport=True
                     )
                     page = context.pages[0] if context.pages else context.new_page()
-                    page.goto(url)
+                    page.goto(url) 
                     
+                    # 🌟 绝杀修复 3：如果发现由于没有外链，又退回到了 activity 页面
+                    # 直接开启自动驾驶，代替用户在页面里搜寻卡片并强制点击！
+                    if "activity" in page.url:
+                        self.log(f"⚡ 未找到静态跳转链接，已启动【自动模拟点击】机制...", "info")
+                        try:
+                            # 稍作滚动，防止商品在屏幕外
+                            for _ in range(5):
+                                page.evaluate("window.scrollBy(0, 500)")
+                                time.sleep(0.1)
+
+                            # 注入自动点击 JS
+                            clicked = page.evaluate(f"""(tName) => {{
+                                const elements = Array.from(document.querySelectorAll('*'));
+                                for (const el of elements) {{
+                                    // 找到包含套餐名字的那行文字
+                                    if (el.children.length === 0 && (el.innerText || '').includes(tName)) {{
+                                        let card = el.parentElement;
+                                        // 往上找包裹它的卡片容器，在这个容器里找购买按钮
+                                        for (let i = 0; i < 8; i++) {{
+                                            if (card) {{
+                                                const btns = Array.from(card.querySelectorAll('a, button, div')).filter(b => 
+                                                    /立即|使用|购买|抢购|下单/.test((b.innerText || '').replace(/\\s+/g, ''))
+                                                );
+                                                if (btns.length > 0) {{
+                                                    btns[btns.length - 1].click();
+                                                    return true;
+                                                }}
+                                                card = card.parentElement;
+                                            }}
+                                        }}
+                                    }}
+                                }}
+                                return false;
+                            }}""", target_name)
+                            
+                            if clicked:
+                                self.log(f"✅ 已成功自动帮您点击了【{target_name}】的购买按钮！", "success")
+                            else:
+                                self.log(f"⚠ 自动点击未命中，请您在网页中手动点击。", "warn")
+                        except Exception as e:
+                            pass # 忽略自动点击产生的报错，不影响主流程
+
                     try: page.wait_for_event("close", timeout=0)
                     except: pass
                     finally:
@@ -355,7 +430,6 @@ class VMRackSentinelApp:
         threading.Thread(target=_task, daemon=True).start()
 
     def _do_login(self):
-        # 修复3：增加占用锁，彻底避免点两次带来的崩溃死锁
         if getattr(self, '_browser_open', False):
             self.log("⚠ 浏览器已经被占用，请先关闭当前浏览器窗口。", "warn")
             return
@@ -376,19 +450,14 @@ class VMRackSentinelApp:
                     page.goto(login_url)
                     
                     try:
-                        # 只有真正等到了跳转网址，才认为是真登录
                         page.wait_for_url("https://www.vmrack.net/**", timeout=0)
-                        
-                        # 成功跳转后，提取Cookie保存
                         context.storage_state(path=SESSION_FILE)
                         self.log("✅ 登录状态已成功保存至本地档案！", "success")
                         self.root.after(0, lambda: self._update_login_btn(True))
                         
                     except Exception:
-                        # 如果是用户手动关闭了窗口，会抛出异常跳到这里，不修改任何登录状态
                         self.log("ℹ️ 浏览器窗口已关闭（未检测到完成登录）。", "info")
                     finally:
-                        # 修复4：无论发不发生异常，确保底层浏览器进程被严格杀死
                         try: context.close()
                         except: pass
                         
