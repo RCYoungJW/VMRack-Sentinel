@@ -29,6 +29,7 @@ else:
     _RUN_DIR = os.path.dirname(os.path.abspath(__file__))
 
 SESSION_FILE = os.path.join(_RUN_DIR, "vm_login_state.json")
+PROFILE_DIR = os.path.join(_RUN_DIR, "vmrack_profile")
 ACTIVITY_URL = "https://www.vmrack.net/zh-CN/activity/2026-spring"
 
 def _beep():
@@ -62,7 +63,7 @@ class VMRackSentinelApp:
         self.running            = False
         self.target_name        = ""
         self.target_iid         = None
-        self.package_urls       = {}  # 存储提取到的套餐专属购买链接
+        self.package_urls       = {}  
         self._alarm_stop        = threading.Event()
         self._dialog_lock       = threading.Lock()
         self._dialog_showing    = False
@@ -109,6 +110,10 @@ class VMRackSentinelApp:
         self.btn_monitor = self._pill_btn(btns, "开始监测",   self._toggle,     ghost=False)
         self.btn_login.pack(side="left", padx=(0, 12)); self.btn_scan.pack(side="left", padx=(0, 12)); self.btn_monitor.pack(side="left")
         
+        # 初始化登录按钮状态
+        if os.path.exists(SESSION_FILE) or os.path.exists(PROFILE_DIR):
+            self._update_login_btn(is_logged_in=True)
+
         self.btn_scan.config(state="disabled")
         self.btn_monitor.config(state="disabled", bg="#D1D1D6", fg="white", disabledforeground="white")
 
@@ -144,6 +149,13 @@ class VMRackSentinelApp:
         if ghost: return tk.Button(parent, text=text, command=cmd, font=_sf(12), fg=PAL["accent"], bg=PAL["card"], relief="flat", bd=0, padx=16, pady=7, cursor="hand2")
         return tk.Button(parent, text=text, command=cmd, font=_sf(12, "bold"), fg="white", bg=PAL["accent"], activeforeground="white", disabledforeground="white", relief="flat", bd=0, padx=26, pady=7, cursor="hand2")
 
+    def _update_login_btn(self, is_logged_in):
+        """动态更新登录按钮的文字和颜色"""
+        if is_logged_in:
+            self.btn_login.config(text="✅ 已登录", fg=PAL["success"])
+        else:
+            self.btn_login.config(text="登录账号", fg=PAL["accent"])
+
     def log(self, text: str, level="info"):
         self.root.after(0, self._write_log, text, level)
 
@@ -173,24 +185,30 @@ class VMRackSentinelApp:
         ))
 
     def _core_scanner(self, is_monitoring=False):
-        if not self._env_ready: return []
+        """返回字典结构: {'expired': bool, 'items': list}"""
+        if not self._env_ready: return {"expired": False, "items": []}
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(channel="msedge", headless=True)
                 ctx_kwargs = {"storage_state": SESSION_FILE} if os.path.exists(SESSION_FILE) else {}
                 page = browser.new_context(no_viewport=True, **ctx_kwargs).new_page()
                 page.goto(ACTIVITY_URL, timeout=50000, wait_until="domcontentloaded")
+                
                 if not is_monitoring: self.log("📡 深度探测中，滚动加载全量数据...", "info")
+                
                 results = page.evaluate("""async () => {
                     for (let i = 0; i < 20; i++) { window.scrollTo(0, i * 600); await new Promise(r => setTimeout(r, 120)); }
                     await new Promise(r => setTimeout(r, 1800));
+                    
+                    // 核心校验：检测网页内是否存在登录链接，以此判断是否掉线失效
+                    const isLoggedOut = !!document.querySelector('a[href*="/login"], a[href*="sign-in"]');
+                    
                     const data = []; const seen = new Set();
                     document.querySelectorAll('div, section, article').forEach(card => {
                         const raw = card.innerText || ''; if (!raw.includes('VPS') || !raw.includes('$')) return;
                         const nameLine = raw.split('\\n').find(l => l.includes('VPS'));
                         if (!nameLine || seen.has(nameLine)) return; seen.add(nameLine);
                         
-                        // 获取购买链接逻辑
                         let link = 'https://www.vmrack.net/zh-CN/activity/2026-spring';
                         const aNode = card.querySelector('a');
                         if (aNode && aNode.href) { link = aNode.href; }
@@ -201,10 +219,13 @@ class VMRackSentinelApp:
                             url: link
                         });
                     });
-                    return data;
+                    return { expired: isLoggedOut, items: data };
                 }""")
-                browser.close(); return results
-        except Exception as e: self.log(f"⚠ 扫描异常: {e}", "warn"); return []
+                browser.close()
+                return results
+        except Exception as e: 
+            self.log(f"⚠ 扫描异常: {e}", "warn")
+            return {"expired": False, "items": []}
 
     def _scan_async(self):
         if not self._scan_lock.acquire(blocking=False): return
@@ -215,20 +236,33 @@ class VMRackSentinelApp:
     def _scan_task(self):
         try:
             results = self._core_scanner(is_monitoring=False)
-            self.root.after(0, self._update_tree, results)
+            expired = results.get("expired", False)
+            items = results.get("items", [])
+            
+            self.root.after(0, lambda: self._handle_scan_result(expired, items))
         finally:
-            self._scan_lock.release(); self.root.after(0, lambda: self.btn_scan.config(state="normal"))
+            self._scan_lock.release()
+            self.root.after(0, lambda: self.btn_scan.config(state="normal"))
 
-    def _update_tree(self, items):
+    def _handle_scan_result(self, expired, items):
+        """统一处理扫描结果并同步UI状态"""
+        # 实时同步按钮状态
+        self._update_login_btn(not expired)
+        if expired and self.btn_login.cget("text") != "登录账号":
+            self.log("⚠ 发现登录状态已失效，部分抢购可能受限，请重新登录！", "warn")
+
         for i in self.tree.get_children(): self.tree.delete(i)
         if not items: return
+        
         for idx, item in enumerate(items):
             clean_name = item['name'].strip()
-            self.package_urls[clean_name] = item.get("url", ACTIVITY_URL) # 储存购买链接
+            self.package_urls[clean_name] = item.get("url", ACTIVITY_URL)
             tag = ("stock" if "有货" in item["status"] else "sold",) + (("alt",) if idx % 2 == 1 else ())
             self.tree.insert("", "end", values=(f"  {clean_name}", item["status"]), tags=tag)
+            
         stock_cnt = sum(1 for i in items if "有货" in i["status"])
         self._count_lbl.config(text=f"{len(items)} 个套餐  ·  {stock_cnt} 个有货")
+        
         if not self.running:
             self.log(f"✅ 扫描完成，共 {len(items)} 项，{stock_cnt} 项有货。", "success")
             self._set_status("就绪", PAL["success"]); self.btn_monitor.config(state="normal", bg=PAL["accent"])
@@ -251,13 +285,23 @@ class VMRackSentinelApp:
         while self.running:
             results = self._core_scanner(is_monitoring=True)
             if not self.running: break
-            match = next((r for r in results if r["name"].strip() == self.target_name.strip()), None)
+            
+            expired = results.get("expired", False)
+            items = results.get("items", [])
+            
+            # 监控中如果发现登录失效，立刻切换按钮状态并警告
+            self.root.after(0, lambda e=expired: self._update_login_btn(not e))
+            if expired:
+                self.log("⚠ 警告：监测到登录已掉线失效，请尽快重新登录！", "warn")
+
+            match = next((r for r in items if r["name"].strip() == self.target_name.strip()), None)
             if match:
                 self.log(f"↻ 轮询结果：{self.target_name}  →  {match['status']}", "info")
-                self.root.after(0, self._update_tree, results)
+                self.root.after(0, lambda: self._handle_scan_result(expired, items))
                 if "有货" in match["status"]:
                     self.running = False; self.root.after(0, self._show_alert); break
             time.sleep(5)
+            
         self.root.after(0, lambda: self.btn_monitor.config(text="开始监测", bg=PAL["accent"], fg="white"))
         self._set_status("监测已结束", PAL["subtext"]); self._monitor_thread_active = False
 
@@ -266,7 +310,6 @@ class VMRackSentinelApp:
         self._dialog_showing = True; self._alarm_stop.clear(); threading.Thread(target=self._alarm_worker, daemon=True).start()
         win = tk.Toplevel(self.root); win.title("补货提醒"); win.geometry("960x650"); win.resizable(False, False); win.configure(bg=PAL["card"]); win.attributes("-topmost", True)
         
-        # 提取目标套餐的专属购买链接
         target_url = self.package_urls.get(self.target_name.strip(), ACTIVITY_URL)
 
         def _dismiss():
@@ -284,20 +327,17 @@ class VMRackSentinelApp:
         while not self._alarm_stop.is_set(): _beep(); time.sleep(0.35)
 
     def _open_browser_to_buy(self, url):
-        """调用持久化浏览器档案打开购买链接，确保处于已登录状态"""
         def _task():
             try:
                 with sync_playwright() as p:
-                    profile_path = os.path.join(_RUN_DIR, "vmrack_profile")
                     context = p.chromium.launch_persistent_context(
-                        user_data_dir=profile_path,
+                        user_data_dir=PROFILE_DIR,
                         channel="msedge",
                         headless=False,
                         no_viewport=True
                     )
                     page = context.pages[0] if context.pages else context.new_page()
                     page.goto(url)
-                    # 保持浏览器开启，由用户手动关闭
                     page.wait_for_event("close", timeout=0)
                     context.close()
             except Exception as e:
@@ -309,30 +349,27 @@ class VMRackSentinelApp:
         def _task():
             try:
                 with sync_playwright() as p:
-                    # 使用持久化上下文(Persistent Context)建立专属档案
-                    profile_path = os.path.join(_RUN_DIR, "vmrack_profile")
                     context = p.chromium.launch_persistent_context(
-                        user_data_dir=profile_path,
+                        user_data_dir=PROFILE_DIR,
                         channel="msedge",
                         headless=False,
                         no_viewport=True
                     )
                     
                     page = context.pages[0] if context.pages else context.new_page()
-                    
-                    # SSO 登录链接
                     login_url = "https://sso.vmrack.net/sign-in?redirect=https%253A%252F%252Fwww.vmrack.net"
                     page.goto(login_url)
                     
                     try:
-                        # 监测重定向，回到主站代表登录成功
                         page.wait_for_url("https://www.vmrack.net/**", timeout=0)
                     except Exception:
                         pass
                     
-                    # 保存 Session 文件供后台隐藏扫描使用
                     context.storage_state(path=SESSION_FILE)
                     self.log("✅ 登录状态已成功保存至本地档案！", "success")
+                    
+                    # 登录成功后，主动将UI按钮切回已登录状态
+                    self.root.after(0, lambda: self._update_login_btn(True))
                     context.close()
             except Exception as e:
                 if "Target closed" not in str(e) and "has been closed" not in str(e):
