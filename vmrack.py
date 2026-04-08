@@ -7,7 +7,7 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import ctypes
 
-# ── DPI 感知 (保持 4K 清晰) ──────────────────────────────────────────────────
+# ── DPI 感知 (保持清晰) ──────────────────────────────────────────────────
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
@@ -22,7 +22,7 @@ try:
 except ImportError:
     PLAYWRIGHT_OK = False
 
-# ── 路径与目录锁定逻辑 (确保配置保存在当前文件夹) ──────────────────────────────────────────
+# ── 路径与目录锁定逻辑 ──────────────────────────────────────────────────────────
 if getattr(sys, 'frozen', False):
     _RUN_DIR = os.path.dirname(sys.executable)
 else:
@@ -31,6 +31,30 @@ else:
 SESSION_FILE = os.path.join(_RUN_DIR, "vm_login_state.json")
 PROFILE_DIR = os.path.join(_RUN_DIR, "vmrack_profile")
 ACTIVITY_URL = "https://www.vmrack.net/zh-CN/activity/2026-spring"
+
+# 🌟 核心：检测文件是否包含有效 Cookie 数据
+def check_login_state():
+    # 1. 检测 json 文件
+    if os.path.exists(SESSION_FILE): 
+        try:
+            if os.path.getsize(SESSION_FILE) > 400:
+                return True
+        except: pass
+
+    # 2. 深入探测 vmrack_profile
+    cookies_db = os.path.join(PROFILE_DIR, "Default", "Network", "Cookies")
+    if not os.path.exists(cookies_db):
+        cookies_db = os.path.join(PROFILE_DIR, "Default", "Cookies")
+        
+    if os.path.exists(cookies_db):
+        try:
+            if os.path.getsize(cookies_db) > 16384:
+                with open(cookies_db, 'rb') as f:
+                    if b'vmrack.net' in f.read():
+                        return True
+        except: pass
+        
+    return False
 
 def _beep():
     try:
@@ -110,9 +134,6 @@ class VMRackSentinelApp:
         self.btn_scan    = self._pill_btn(btns, "全量扫描",   self._scan_async, ghost=True)
         self.btn_monitor = self._pill_btn(btns, "开始监测",   self._toggle,     ghost=False)
         self.btn_login.pack(side="left", padx=(0, 12)); self.btn_scan.pack(side="left", padx=(0, 12)); self.btn_monitor.pack(side="left")
-        
-        if os.path.exists(SESSION_FILE):
-            self._update_login_btn(is_logged_in=True)
 
         self.btn_scan.config(state="disabled")
         self.btn_monitor.config(state="disabled", bg="#D1D1D6", fg="white", disabledforeground="white")
@@ -170,25 +191,24 @@ class VMRackSentinelApp:
 
     def _auto_setup(self):
         if not PLAYWRIGHT_OK:
-            self.log("❌ 未检测到 Playwright，请在终端执行: pip install playwright", "error")
+            self.log("❌ 未检测到 Playwright", "error")
             self._set_status("环境缺失", PAL["danger"])
             return
 
         self._env_ready = True
         self.log("✅ Playwright 环境就绪，将直接调用原生浏览器架构。", "success")
         self._set_status("就绪", PAL["success"])
-        
-        self.root.after(0, lambda: (
-            self.btn_scan.config(state="normal"),
-            self.btn_monitor.config(state="normal", bg=PAL["accent"])
-        ))
+        self.root.after(0, lambda: (self.btn_scan.config(state="normal"), self.btn_monitor.config(state="normal", bg=PAL["accent"])))
 
     def _core_scanner(self, is_monitoring=False):
-        if not self._env_ready: return {"expired": False, "items": []}
+        if not self._env_ready: return {"items": []}
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(channel="msedge", headless=True)
+                
+                # 🌟 终极修复：只在文件绝对存在时才加载，防止 FileNotFoundError 报错闪退
                 ctx_kwargs = {"storage_state": SESSION_FILE} if os.path.exists(SESSION_FILE) else {}
+                
                 page = browser.new_context(no_viewport=True, **ctx_kwargs).new_page()
                 page.goto(ACTIVITY_URL, timeout=50000, wait_until="domcontentloaded")
                 
@@ -198,7 +218,6 @@ class VMRackSentinelApp:
                     document.querySelectorAll('script, style, noscript, svg, template').forEach(el => el.remove());
                     for (let i = 0; i < 15; i++) { window.scrollTo(0, i * 600); await new Promise(r => setTimeout(r, 100)); }
                     await new Promise(r => setTimeout(r, 1500));
-                    const isLoggedOut = !!document.querySelector('a[href*="/login"], a[href*="sign-in"]');
                     const data = [];
                     const seen = new Set();
                     const defaultUrl = 'https://www.vmrack.net/zh-CN/activity/2026-spring';
@@ -237,16 +256,17 @@ class VMRackSentinelApp:
                             data.push({ name: title, status: isSoldOut ? '❌ 售罄' : '✅ 有货', url: url });
                         }
                     }
-                    return { expired: isLoggedOut, items: data };
+                    return { items: data };
                 }""")
                 browser.close()
                 return results
         except Exception as e: 
             self.log(f"⚠ 扫描异常: {e}", "warn")
-            return {"expired": False, "items": []}
+            return {"items": []}
 
     def _scan_async(self):
         if not self._scan_lock.acquire(blocking=False): return
+        
         self.btn_scan.config(state="disabled"); self._set_status("扫描中...", PAL["accent"])
         self.log("🚀 启动全量扫描...", "info")
         threading.Thread(target=self._scan_task, daemon=True).start()
@@ -254,17 +274,15 @@ class VMRackSentinelApp:
     def _scan_task(self):
         try:
             results = self._core_scanner(is_monitoring=False)
-            expired = results.get("expired", False)
             items = results.get("items", [])
-            self.root.after(0, lambda: self._handle_scan_result(expired, items))
+            self.root.after(0, lambda: self._handle_scan_result(items))
         finally:
             self._scan_lock.release()
             self.root.after(0, lambda: self.btn_scan.config(state="normal"))
 
-    def _handle_scan_result(self, expired, items):
-        self._update_login_btn(not expired)
-        if expired and self.btn_login.cget("text") != "登录账号":
-            self.log("⚠ 发现登录状态已失效，部分抢购可能受限，请重新登录！", "warn")
+    def _handle_scan_result(self, items):
+        self._update_login_btn(check_login_state())
+        
         for i in self.tree.get_children(): self.tree.delete(i)
         if not items: return
         for idx, item in enumerate(items):
@@ -280,11 +298,18 @@ class VMRackSentinelApp:
 
     def _toggle(self):
         if self.running:
-            self.running = False; self.btn_monitor.config(text="开始监测", bg=PAL["accent"], fg="white")
-            self._set_status("就绪", PAL["success"]); self.log("⏹ 监测已手动停止。", "info"); return
+            self.running = False
+            self.btn_monitor.config(state="disabled", text="正在停止...", bg=PAL["subtext"], fg="white")
+            self._set_status("正在停止...", PAL["warn"])
+            self.log("⏹ 正在停止监测任务...", "info")
+            return
+            
         if self._monitor_thread_active: return
         sel = self.tree.selection()
         if not sel: self.log("⚠ 请先在列表中选择一个套餐。", "warn"); return
+        
+        self._update_login_btn(check_login_state())
+        
         self.target_name = self.tree.item(sel[0])["values"][0].strip(); self.target_iid = sel[0]
         self.running = True; self.btn_monitor.config(text="停止监测", bg=PAL["danger"], fg="white")
         self._set_status(f"监测中：{self.target_name[:25]}...", PAL["accent"])
@@ -296,20 +321,27 @@ class VMRackSentinelApp:
         while self.running:
             results = self._core_scanner(is_monitoring=True)
             if not self.running: break
-            expired = results.get("expired", False)
             items = results.get("items", [])
-            self.root.after(0, lambda e=expired: self._update_login_btn(not e))
-            if expired: self.log("⚠ 警告：监测到登录已掉线失效，请尽快重新登录！", "warn")
+            
+            self.root.after(0, lambda: self._update_login_btn(check_login_state()))
+
             match = next((r for r in items if r["name"].strip() == self.target_name.strip()), None)
             if match:
                 self.package_urls[self.target_name.strip()] = match.get("url", ACTIVITY_URL)
                 self.log(f"↻ 轮询结果：{self.target_name}  →  {match['status']}", "info")
-                self.root.after(0, lambda: self._handle_scan_result(expired, items))
+                self.root.after(0, lambda: self._handle_scan_result(items))
                 if "有货" in match["status"]:
                     self.running = False; self.root.after(0, self._show_alert); break
-            time.sleep(5)
-        self.root.after(0, lambda: self.btn_monitor.config(text="开始监测", bg=PAL["accent"], fg="white"))
-        self._set_status("监测已结束", PAL["subtext"]); self._monitor_thread_active = False
+            
+            for _ in range(25):
+                if not self.running: break
+                time.sleep(0.2)
+                
+        self.root.after(0, lambda: (
+            self.btn_monitor.config(state="normal", text="开始监测", bg=PAL["accent"], fg="white"),
+            self._set_status("就绪", PAL["success"])
+        ))
+        self._monitor_thread_active = False
 
     def _show_alert(self):
         if self._dialog_showing: return
@@ -349,7 +381,7 @@ class VMRackSentinelApp:
                             page.evaluate(f"""(tName) => {{
                                 const elements = Array.from(document.querySelectorAll('*'));
                                 for (const el of elements) {{
-                                    if (el && el.children.length === 0 && (el.innerText || '').includes(tName)) {{
+                                    if (el.children.length === 0 && (el.innerText || '').includes(tName)) {{
                                         let card = el.parentElement;
                                         for (let i = 0; i < 8; i++) {{
                                             if (card) {{
@@ -366,10 +398,7 @@ class VMRackSentinelApp:
                         except: pass
                     try: 
                         page.wait_for_event("close", timeout=0)
-                        # 🌟 核心：保存登录状态
                         context.storage_state(path=SESSION_FILE)
-                        self.root.after(0, lambda: self._update_login_btn(True))
-                        self.log("✅ 登录状态已同步到本地。", "success")
                     except: pass
                     finally:
                         try: context.close()
@@ -378,6 +407,7 @@ class VMRackSentinelApp:
                 self.log(f"❌ 唤起购买页面失败: {e}", "error")
             finally:
                 self._browser_open = False
+                self.root.after(0, lambda: self._update_login_btn(check_login_state()))
         threading.Thread(target=_task, daemon=True).start()
 
     def _do_login(self):
@@ -395,10 +425,7 @@ class VMRackSentinelApp:
                     try:
                         page.wait_for_url("https://www.vmrack.net/**", timeout=0)
                         context.storage_state(path=SESSION_FILE)
-                        self.log("✅ 登录状态已成功保存至本地档案！", "success")
-                        self.root.after(0, lambda: self._update_login_btn(True))
-                    except Exception:
-                        self.log("ℹ️ 浏览器窗口已关闭（未检测到完成登录）。", "info")
+                    except Exception: pass
                     finally:
                         try: context.close()
                         except: pass
@@ -407,13 +434,11 @@ class VMRackSentinelApp:
                     self.log(f"❌ 登录异常: {e}", "error")
             finally:
                 self._browser_open = False
+                self.root.after(0, lambda: self._update_login_btn(check_login_state()))
         threading.Thread(target=_task, daemon=True).start()
 
-# ── 🌟 修改部分：启动入口图标逻辑 ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     root = tk.Tk()
-    
-    # 自动定位内部图标文件
     if hasattr(sys, '_MEIPASS'):
         try:
             _img_path = os.path.join(sys._MEIPASS, "icon.png")
@@ -421,6 +446,6 @@ if __name__ == "__main__":
                 _icon = tk.PhotoImage(file=_img_path)
                 root.iconphoto(True, _icon)
         except: pass
-            
     app = VMRackSentinelApp(root)
+    app._update_login_btn(check_login_state())
     root.mainloop()
